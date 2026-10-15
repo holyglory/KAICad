@@ -1681,11 +1681,8 @@ public sealed partial class NativeSessionTests
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbShape } }, token)).Items
                 .Select(item => item.Unpack<BoardGraphicShape>())
                 .Where(shape => shape.Layer == BoardLayer.BlEdgeCuts).ToArray();
-            Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Polygon
-                && shape.Shape.Polygon.Polygons.Any(polygon => polygon.Outline.Nodes.Count == 8)),
-                "The clean route fixture must retain the concave Edge.Cuts outline.");
             Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Rectangle),
-                "The clean route fixture must retain the separate Edge.Cuts cutout loop.");
+                "The positive DRC route fixture must retain a simple Edge.Cuts rectangle.");
 
             var pairPads = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
@@ -4124,6 +4121,81 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(viaKeepoutResult.State, await ObserveLifecycleState(client, cleanBoard, token),
                     "The rejected via candidate must leave the live board unchanged.");
 
+                // Switch the board outline only after the positive route commit
+                // fixture has completed.  A simple rectangle keeps that
+                // candidate's DRC proof independent of the boundary-topology
+                // journey below; the concave outline and cutout are restored
+                // here for the dedicated boundary planner/DRC checks.
+                var baselineEdge = cleanEdgeCuts.Single(shape =>
+                    shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Rectangle);
+                var removeBaselineEdge = new DeleteItems { Header = new() { Document = cleanBoard },
+                    ItemIds = { baselineEdge.Id.Clone() } };
+                var removeBaselineEdgeReply = await mcp.Tool("kicad_pcb_items_delete", new
+                {
+                    instanceId, requestJson = BoardJson.Formatter.Format(removeBaselineEdge),
+                    expectedStateJson = SchematicJson.Formatter.Format(viaKeepoutResult.State)
+                });
+                RequireToolSuccess(removeBaselineEdgeReply);
+                var boundaryGeometryCreate = new CreateItems { Header = new() { Document = cleanBoard } };
+                string boundaryEdgeId = Guid.NewGuid().ToString("D"), boundaryCutoutId = Guid.NewGuid().ToString("D");
+                boundaryGeometryCreate.Items.Add(Any.Pack(new BoardGraphicShape
+                {
+                    Id = new() { Value = boundaryEdgeId }, Layer = BoardLayer.BlEdgeCuts,
+                    Shape = new GraphicShape
+                    {
+                        Attributes = new() { Stroke = new() { Width = new() { ValueNm = 50_000 } } },
+                        Polygon = new PolySet
+                        {
+                            Polygons =
+                            {
+                                new PolygonWithHoles
+                                {
+                                    Outline = new PolyLine
+                                    {
+                                        Closed = true,
+                                        Nodes =
+                                        {
+                                            new PolyLineNode { Point = new() { XNm = 0, YNm = 0 } },
+                                            new PolyLineNode { Point = new() { XNm = 100_000_000, YNm = 0 } },
+                                            new PolyLineNode { Point = new() { XNm = 100_000_000, YNm = 100_000_000 } },
+                                            new PolyLineNode { Point = new() { XNm = 0, YNm = 100_000_000 } },
+                                            new PolyLineNode { Point = new() { XNm = 0, YNm = 80_000_000 } },
+                                            new PolyLineNode { Point = new() { XNm = 15_000_000, YNm = 80_000_000 } },
+                                            new PolyLineNode { Point = new() { XNm = 15_000_000, YNm = 20_000_000 } },
+                                            new PolyLineNode { Point = new() { XNm = 0, YNm = 20_000_000 } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }));
+                boundaryGeometryCreate.Items.Add(Any.Pack(new BoardGraphicShape
+                {
+                    Id = new() { Value = boundaryCutoutId }, Layer = BoardLayer.BlEdgeCuts,
+                    Shape = new GraphicShape
+                    {
+                        Attributes = new() { Stroke = new() { Width = new() { ValueNm = 50_000 } } },
+                        Rectangle = new() { TopLeft = new() { XNm = 78_000_000, YNm = 78_000_000 },
+                            BottomRight = new() { XNm = 90_000_000, YNm = 90_000_000 } }
+                    }
+                }));
+                var boundaryGeometryReply = await mcp.Tool("kicad_pcb_items_create", new
+                {
+                    instanceId, requestJson = BoardJson.Formatter.Format(boundaryGeometryCreate),
+                    expectedStateJson = removeBaselineEdgeReply.GetProperty("structuredContent").GetProperty("afterState").GetString()
+                });
+                RequireToolSuccess(boundaryGeometryReply);
+                cleanEdgeCuts = (await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbShape } }, token)).Items
+                    .Select(item => item.Unpack<BoardGraphicShape>())
+                    .Where(shape => shape.Layer == BoardLayer.BlEdgeCuts).ToArray();
+                Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Polygon
+                    && shape.Shape.Polygon.Polygons.Any(polygon => polygon.Outline.Nodes.Count == 8)),
+                    "The boundary fixture must restore the concave Edge.Cuts outline.");
+                Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Rectangle),
+                    "The boundary fixture must restore the separate Edge.Cuts cutout loop.");
+
                 // Add real endpoint pads only after the earlier DRC cases;
                 // otherwise their intentionally disconnected nets would make
                 // those positive checks fail. Both detours are checked and
@@ -4582,13 +4654,11 @@ public sealed partial class NativeSessionTests
         string obstacle = Guid.NewGuid().ToString("D");
         string viaSupport = Guid.NewGuid().ToString("D");
         string edge = Guid.NewGuid().ToString("D");
-        string cutout = Guid.NewGuid().ToString("D");
         // Keep the candidate deliberately small and deterministic: the native
         // shove preview starts at the USB_D+ pad (40.1,40.1) and runs vertically
-        // through a foreign-net POWER_RAIL barrier at y=42. The concave
-        // Edge.Cuts polygon and separate cutout preserve the same working
-        // corridor. Later pad-to-pad routes must detour around the notch and
-        // cutout before native DRC, checked apply and save/reopen.
+        // through a foreign-net POWER_RAIL barrier at y=42. The positive
+        // checked-route DRC proof starts from a simple rectangle; the boundary
+        // journey replaces it with the concave outline and cutout later.
         return $"""
 (kicad_pcb (version 20260206) (generator "pcbnew")
   (general (thickness 1.6))
@@ -4603,8 +4673,7 @@ public sealed partial class NativeSessionTests
   (net 5 "MULTILAYER_BARRIER")
   (net 6 "CONCAVE_ROUTE")
   (net 7 "CUTOUT_ROUTE")
-  (gr_poly (pts (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100) (xy 0 80) (xy 15 80) (xy 15 20) (xy 0 20)) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{edge}"))
-  (gr_rect (start 78 78) (end 90 90) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{cutout}"))
+  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{edge}"))
   (footprint "PAD1" (layer "F.Cu") (at 30.1 30.1) (uuid "{f1}")
     (attr smd)
     (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "POWER_RAIL") (uuid "{p1}")))

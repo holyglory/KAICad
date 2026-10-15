@@ -1240,6 +1240,9 @@ static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRouteP
             return reject( "route_delta_removed_geometry_unassigned",
                            "The complete native route delta cannot identify removed copper for deletion" );
         BOARD_ITEM* parent = item->Parent();
+        if( !iface->IsLiveBoardItem( parent ) )
+            return reject( "route_delta_removed_geometry_stale",
+                           "The complete native route delta references a board item that is no longer live" );
         if( parent->m_Uuid == niluuid || !parent->IsType( { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T } ) )
             return reject( "route_delta_removed_geometry_unsupported", "The complete native route delta removes unsupported board geometry" );
         displacedIds.insert( parent->m_Uuid.AsStdString() );
@@ -1264,7 +1267,11 @@ static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRouteP
         return reject( "route_delta_group_membership_unsupported",
                        "Grouped route deltas require complete route-delta version 2" );
 
-    PNS::ROUTER::PartitionRoutingChanges( removed, added, deleted, created, updated );
+    PNS::ROUTER::PartitionRoutingChanges( removed, added, deleted, created, updated,
+            [iface]( const BOARD_ITEM* item )
+            {
+                return iface->IsLiveBoardItem( item );
+            } );
     response.set_operation_id( operationId );
     for( const auto& id : displacedIds )
         response.add_removed_item_ids()->set_value( id );
@@ -1323,6 +1330,9 @@ static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRouteP
     for( PNS::ITEM* item : created )
     {
         BOARD_ITEM* source = item->Parent() ? item->Parent() : item->GetSourceItem();
+        if( source && !iface->IsLiveBoardItem( source ) )
+            return reject( "route_delta_source_stale",
+                           "The complete native route delta references a stale grouping source" );
         if( source && source->GetParentGroup() && !ensureGroup( source ) )
             return reject( "route_delta_group_membership_unsupported",
                            "The route delta creates grouped-source copper whose ownership cannot be preserved" );

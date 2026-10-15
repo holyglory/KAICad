@@ -123,6 +123,12 @@ public:
 
         for( const auto& [parent, item] : m_updatedItems )
         {
+            // A generator preview can outlive a native item removed by the owning transaction.
+            // Never pass that retained address into BOARD_COMMIT, whose undo-image path must
+            // inspect a live EDA_ITEM.
+            if( !IsLiveBoardItem( parent ) )
+                continue;
+
             int status = aCommit.GetStatus( parent ) & CHT_TYPE;
 
             // Ignore deleted originals and transient generated baselines which were
@@ -148,7 +154,7 @@ public:
             return;
         }
 
-        if( parent )
+        if( IsLiveBoardItem( parent ) )
         {
             m_changes.back().removedItems.emplace( parent );
         }

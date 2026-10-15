@@ -884,6 +884,59 @@ BOOST_AUTO_TEST_CASE( PNSDetachedRouteUpdateUsesSourceAndRejectsOrphans )
 }
 
 
+BOOST_AUTO_TEST_CASE( PNSLivenessRejectsRemovedUuidCacheAlias )
+{
+    BOARD board;
+    board.SetCopperLayerCount( 2 );
+
+    TOOL_MANAGER mgr;
+    mgr.SetEnvironment( &board, nullptr, nullptr, nullptr, nullptr );
+    KI_TEST::DUMMY_TOOL* tool = new KI_TEST::DUMMY_TOOL();
+    mgr.RegisterTool( tool );
+
+    auto* nativeTrack = new PCB_TRACK( &board );
+    nativeTrack->SetStart( VECTOR2I( 100000, 100000 ) );
+    nativeTrack->SetEnd( VECTOR2I( 300000, 100000 ) );
+    nativeTrack->SetWidth( 10000 );
+    nativeTrack->SetLayer( F_Cu );
+    board.Add( nativeTrack );
+
+    auto* removedTrack = new PCB_TRACK( &board );
+    removedTrack->SetStart( VECTOR2I( 100000, 300000 ) );
+    removedTrack->SetEnd( VECTOR2I( 300000, 300000 ) );
+    removedTrack->SetWidth( 10000 );
+    removedTrack->SetLayer( F_Cu );
+    board.Add( removedTrack );
+
+    // Simulate a native import/update that rewrites the UUID without rebinding the board cache.
+    // BOARD::Remove() then leaves the old pointer-keyed alias until destruction.
+    removedTrack->SetUuidDirect( KIID::FromName( "pns-stale-cache-alias" ) );
+    board.Remove( removedTrack );
+    BOOST_REQUIRE( board.IsItemIndexedById( removedTrack ) );
+
+    ROUTE_UPDATE_TEST_IFACE iface;
+    iface.SetBoard( &board );
+
+    PNS::SEGMENT detached( SEG( VECTOR2I( 100000, 100000 ), VECTOR2I( 500000, 100000 ) ), nullptr );
+    detached.SetWidth( 10000 );
+    detached.SetLayer( F_Cu );
+    detached.SetParent( removedTrack );
+    detached.SetSourceItem( nativeTrack );
+
+    BOOST_CHECK( !iface.IsLiveBoardItem( removedTrack ) );
+
+    BOARD_COMMIT commit( tool );
+    iface.modifyBoardItem( &detached, commit );
+
+    BOOST_CHECK_EQUAL( commit.GetStatus( nativeTrack ), CHT_MODIFY );
+    BOOST_CHECK_EQUAL( commit.GetStatus( removedTrack ), 0 );
+    BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), VECTOR2I( 500000, 100000 ) );
+
+    commit.Revert();
+    delete removedTrack;
+}
+
+
 BOOST_AUTO_TEST_CASE( PCBViaBackdrillCloneRetainsData )
 {
     BOARD board;

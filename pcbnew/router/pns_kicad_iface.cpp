@@ -65,6 +65,7 @@
 #include <wx/log.h>
 
 #include <memory>
+#include <algorithm>
 #include <unordered_set>
 
 #include <advanced_config.h>
@@ -1592,9 +1593,42 @@ PNS_KICAD_IFACE_BASE::PNS_KICAD_IFACE_BASE()
 
 bool PNS_KICAD_IFACE_BASE::IsLiveBoardItem( const BOARD_ITEM* aItem ) const
 {
-    // BOARD::IsItemIndexedById() only hashes the pointer key. It remains safe when a router
-    // branch carries an address after the native item has been removed and freed.
-    return m_board && aItem && m_board->IsItemIndexedById( aItem );
+    if( !m_board || !aItem )
+        return false;
+
+    // Do not dereference aItem here.  A router branch may retain a BOARD_ITEM address after
+    // BOARD::Remove() and destruction.  The UUID cache is pointer keyed and therefore cannot
+    // distinguish a stale alias left by an in-place UUID rewrite (or an address reused by a
+    // later allocation).  Compare the address against the board-owned containers instead; every
+    // pointer in these containers is owned by the live board and can safely be dereferenced by
+    // the caller after this check.
+    auto contains = [aItem]( const auto& aItems )
+    {
+        return std::any_of( aItems.begin(), aItems.end(), [aItem]( const auto* item )
+        {
+            return reinterpret_cast<const void*>( item ) == reinterpret_cast<const void*>( aItem );
+        } );
+    };
+
+    if( contains( m_board->Tracks() ) || contains( m_board->Zones() )
+        || contains( m_board->Drawings() ) || contains( m_board->Markers() )
+        || contains( m_board->Groups() ) || contains( m_board->Generators() )
+        || contains( m_board->Points() ) || contains( m_board->Constraints() ) )
+    {
+        return true;
+    }
+
+    for( const FOOTPRINT* footprint : m_board->Footprints() )
+    {
+        if( footprint == aItem || contains( footprint->Pads() ) || contains( footprint->GraphicalItems() )
+            || contains( footprint->Zones() ) || contains( footprint->Groups() )
+            || contains( footprint->GetFields() ) )
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 
@@ -2176,24 +2210,29 @@ bool PNS_KICAD_IFACE::IsAnyLayerVisible( const PNS_LAYER_RANGE& aLayer ) const
 
 bool PNS_KICAD_IFACE_BASE::IsFlashedOnLayer( const PNS::ITEM* aItem, int aLayer ) const
 {
+    if( !aItem )
+        return false;
+
     /// Default is all layers
     if( aLayer < 0 )
         return true;
 
-    if( aItem->Parent() )
+    BOARD_ITEM* parent = aItem->Parent();
+
+    if( IsLiveBoardItem( parent ) )
     {
-        switch( aItem->Parent()->Type() )
+        switch( parent->Type() )
         {
         case PCB_VIA_T:
         {
-            const PCB_VIA* via = static_cast<const PCB_VIA*>( aItem->Parent() );
+            const PCB_VIA* via = static_cast<const PCB_VIA*>( parent );
 
             return via->FlashLayer( GetBoardLayerFromPNSLayer( aLayer ) );
         }
 
         case PCB_PAD_T:
         {
-            const PAD* pad = static_cast<const PAD*>( aItem->Parent() );
+            const PAD* pad = static_cast<const PAD*>( parent );
 
             return pad->FlashLayer( GetBoardLayerFromPNSLayer( aLayer ) );
         }
@@ -2212,15 +2251,19 @@ bool PNS_KICAD_IFACE_BASE::IsFlashedOnLayer( const PNS::ITEM* aItem, int aLayer 
 
 bool PNS_KICAD_IFACE_BASE::IsFlashedOnLayer( const PNS::ITEM* aItem, const PNS_LAYER_RANGE& aLayer ) const
 {
-    PNS_LAYER_RANGE test = aItem->Layers().Intersection( aLayer );
+    if( !aItem )
+        return false;
 
-    if( aItem->Parent() )
+    PNS_LAYER_RANGE test = aItem->Layers().Intersection( aLayer );
+    BOARD_ITEM* parent = aItem->Parent();
+
+    if( IsLiveBoardItem( parent ) )
     {
-        switch( aItem->Parent()->Type() )
+        switch( parent->Type() )
         {
         case PCB_VIA_T:
         {
-            const PCB_VIA* via = static_cast<const PCB_VIA*>( aItem->Parent() );
+            const PCB_VIA* via = static_cast<const PCB_VIA*>( parent );
 
             for( int layer = test.Start(); layer <= test.End(); ++layer )
             {
@@ -2233,7 +2276,7 @@ bool PNS_KICAD_IFACE_BASE::IsFlashedOnLayer( const PNS::ITEM* aItem, const PNS_L
 
         case PCB_PAD_T:
         {
-            const PAD* pad = static_cast<const PAD*>( aItem->Parent() );
+            const PAD* pad = static_cast<const PAD*>( parent );
 
             for( int layer = test.Start(); layer <= test.End(); ++layer )
             {
@@ -2270,7 +2313,7 @@ bool PNS_KICAD_IFACE::IsItemVisible( const PNS::ITEM* aItem ) const
 {
     // by default, all items are visible (new ones created by the router have parent == NULL
     // as they have not been committed yet to the BOARD)
-    if( !m_view || !aItem->Parent() )
+    if( !m_view || !aItem || !IsLiveBoardItem( aItem->Parent() ) )
         return true;
 
     BOARD_ITEM*      item = aItem->Parent();
@@ -2487,13 +2530,16 @@ void PNS_KICAD_IFACE_BASE::SetDebugDecorator( PNS::DEBUG_DECORATOR *aDec )
 
 void PNS_KICAD_IFACE::DisplayItem( const PNS::ITEM* aItem, int aClearance, bool aEdit, int aFlags )
 {
-       if( aItem->IsVirtual() )
+    if( !aItem || aItem->IsVirtual() )
         return;
 
-    if( ZONE* zone = dynamic_cast<ZONE*>( aItem->Parent() ) )
+    if( IsLiveBoardItem( aItem->Parent() ) )
     {
-        if( zone->GetIsRuleArea() )
-            aFlags |= PNS_SEMI_SOLID;
+        if( ZONE* zone = dynamic_cast<ZONE*>( aItem->Parent() ) )
+        {
+            if( zone->GetIsRuleArea() )
+                aFlags |= PNS_SEMI_SOLID;
+        }
     }
 
     ROUTER_PREVIEW_ITEM* pitem = new ROUTER_PREVIEW_ITEM( aItem, this, m_view, aFlags );
@@ -3279,8 +3325,13 @@ PNS_KICAD_IFACE_BASE::GetLengthDelayCalculationItems( const PNS::ITEM_SET& aLine
 
             if( layerPrev != layerNext )
             {
+                BOARD_ITEM* source = lineItem->GetSourceItem();
+
+                if( !IsLiveBoardItem( source ) || source->Type() != PCB_VIA_T )
+                    continue;
+
                 LENGTH_DELAY_CALCULATION_ITEM item;
-                item.SetVia( static_cast<PCB_VIA*>( lineItem->GetSourceItem() ) );
+                item.SetVia( static_cast<PCB_VIA*>( source ) );
                 item.SetLayers( pcbLayerPrev, pcbLayerNext ); // TODO: BUG IS HERE!!!
                 item.SetEffectiveNetClass( aNetClass );
                 lengthItems.emplace_back( std::move( item ) );

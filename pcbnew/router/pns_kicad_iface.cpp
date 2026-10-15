@@ -341,6 +341,15 @@ PNS_PCBNEW_RULE_RESOLVER::PNS_PCBNEW_RULE_RESOLVER( BOARD* aBoard,
 }
 
 
+bool PNS_KICAD_IFACE_BASE::IsLiveBoardItem( const BOARD_ITEM* aItem ) const
+{
+    // Unit-level adapter tests may call the mutation path without a world
+    // synchronization.  The editor path always populates this set first.
+    return aItem && ( m_liveBoardItems.empty()
+                      || m_liveBoardItems.contains( const_cast<BOARD_ITEM*>( aItem ) ) );
+}
+
+
 PNS_PCBNEW_RULE_RESOLVER::~PNS_PCBNEW_RULE_RESOLVER()
 {
 }
@@ -2299,6 +2308,32 @@ void PNS_KICAD_IFACE_BASE::SyncWorld( PNS::NODE *aWorld )
 
     int worstClearance = m_board->GetMaxClearanceValue();
 
+    m_liveBoardItems.clear();
+    auto remember = [&]( BOARD_ITEM* aItem )
+    {
+        if( aItem )
+            m_liveBoardItems.insert( aItem );
+    };
+
+    for( BOARD_ITEM* item : m_board->Drawings() )
+        remember( item );
+    for( ZONE* zone : m_board->Zones() )
+        remember( zone );
+    for( FOOTPRINT* footprint : m_board->Footprints() )
+    {
+        remember( footprint );
+        for( PAD* pad : footprint->Pads() )
+            remember( pad );
+        remember( &footprint->Reference() );
+        remember( &footprint->Value() );
+        for( PCB_FIELD* field : footprint->GetFields() )
+            remember( field );
+        for( BOARD_ITEM* item : footprint->GraphicalItems() )
+            remember( item );
+    }
+    for( PCB_TRACK* track : m_board->Tracks() )
+        remember( track );
+
     m_world = aWorld;
 
     for( BOARD_ITEM* gitem : m_board->Drawings() )
@@ -2624,7 +2659,13 @@ void PNS_KICAD_IFACE_BASE::RemoveItem( PNS::ITEM* aItem )
 
 void PNS_KICAD_IFACE::RemoveItem( PNS::ITEM* aItem )
 {
-    BOARD_ITEM* parent = aItem->Parent();
+    if( !aItem )
+        return;
+
+    BOARD_ITEM* parent = aItem->Parent() ? aItem->Parent() : aItem->GetSourceItem();
+
+    if( !parent || !IsLiveBoardItem( parent ) )
+        return;
 
     if( aItem->OfKind( PNS::ITEM::SOLID_T ) && parent->Type() == PCB_PAD_T )
     {
@@ -2725,7 +2766,10 @@ std::unique_ptr<BOARD_CONNECTED_ITEM> PNS_KICAD_IFACE::MaterializeRouteItem(
     // original board object as their source item. Preserve that native UUID
     // for replacement updates instead of rejecting an otherwise valid via.
     BOARD_ITEM* source = aItem->Parent() ? aItem->Parent() : aItem->GetSourceItem();
-    if( aPreserveIdentity && ( !source || source->Type() != type ) )
+    if( source && !IsLiveBoardItem( source ) )
+        return nullptr;
+
+    if( aPreserveIdentity && ( !source || !IsLiveBoardItem( source ) || source->Type() != type ) )
         return nullptr;
 
     std::unique_ptr<BOARD_CONNECTED_ITEM> result;
@@ -2771,7 +2815,7 @@ void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem, BOARD_COMMIT& aCommit )
     // pointer is auxiliary geometry and cannot be committed safely.
     BOARD_ITEM* original = aItem->Parent() ? aItem->Parent() : aItem->GetSourceItem();
 
-    if( !original )
+    if( !original || !IsLiveBoardItem( original ) )
         return;
 
     if( auto materialized = MaterializeRouteItem( aItem, true ) )
@@ -2802,6 +2846,12 @@ void PNS_KICAD_IFACE_BASE::AddItem( PNS::ITEM* aItem )
 
 BOARD_CONNECTED_ITEM* PNS_KICAD_IFACE::createBoardItem( PNS::ITEM* aItem )
 {
+    if( !aItem )
+        return nullptr;
+
+    if( BOARD_ITEM* source = aItem->GetSourceItem(); source && !IsLiveBoardItem( source ) )
+        return nullptr;
+
     if( aItem->Kind() == PNS::ITEM::SOLID_T )
     {
         PAD* pad = static_cast<PAD*>( aItem->Parent() );
@@ -2818,7 +2868,7 @@ BOARD_CONNECTED_ITEM* PNS_KICAD_IFACE::createBoardItem( PNS::ITEM* aItem )
         net->SetParent( m_board );
         net->SetNetClass( m_board->GetDesignSettings().m_NetSettings->GetDefaultNetclass() );
     }
-    if( BOARD_ITEM* source = aItem->GetSourceItem() )
+    if( BOARD_ITEM* source = aItem->GetSourceItem(); source && IsLiveBoardItem( source ) )
     {
         if( !m_itemGroups.contains( source ) )
             if( EDA_GROUP* group = source->GetParentGroup() )
@@ -2852,7 +2902,14 @@ void PNS_KICAD_IFACE::applyFootprintOffsets( BOARD_COMMIT& aCommit )
     for( const auto& [ pad, fpOffset ] : m_fpOffsets )
     {
         VECTOR2I   offset = fpOffset.p_new - fpOffset.p_old;
+        if( !pad || !IsLiveBoardItem( pad ) )
+            continue;
+
         FOOTPRINT* footprint = pad->GetParentFootprint();
+
+        if( !footprint || !IsLiveBoardItem( footprint ) )
+            continue;
+
         VECTOR2I   p_orig = footprint->GetPosition();
         VECTOR2I   p_new = p_orig + offset;
 

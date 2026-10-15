@@ -111,6 +111,11 @@ public sealed partial class NativeSessionTests
             Console.WriteLine("PCB checks in two projects at once run from project 1, once both boards are open.");
             return;
         }
+        if (Environment.GetEnvironmentVariable("KICAD_DRC_RESTART_ONLY") == "1")
+        {
+            await VerifyPcbDrcNativeRestart(display, evidence, token);
+            return;
+        }
         Assert.IsTrue(File.Exists(siblingBoardPath),
             $"Project 1 runs the two-project PCB checks, so project 0's board {siblingBoardPath} must already exist.");
         var clock = Stopwatch.StartNew();
@@ -651,6 +656,174 @@ public sealed partial class NativeSessionTests
             var fixtureTrack = await native.InvokeAsync<GetItemsById, GetItemsResponse>(new()
                 { Header = new() { Document = target }, Items = { new KIID { Value = "33333333-3333-4333-8333-333333333333" } } }, token);
             Assert.HasCount(1, fixtureTrack.Items, $"{path} must hold its own fixture again.");
+        }
+        await VerifyPcbDrcNativeRestart(display, evidence, token);
+    }
+
+    // A disposable native process is stopped before a PCB DRC request can be
+    // answered, then killed and started again with the same instance identity.
+    // The MCP state directory is retained across the reconnect, so this proves
+    // the durable admission receipt remains readable while native lookup stays
+    // fail-closed for the old process epoch.  This is intentionally test-only:
+    // it never kills either editor owned by the surrounding native journey.
+    private static async Task VerifyPcbDrcNativeRestart(string display, string evidence, CancellationToken token)
+    {
+        string root = FindRoot();
+        string executable = Path.Combine(root, "automation", "artifacts", "native", "kicad", "kicad");
+        Assert.IsTrue(File.Exists(executable), "The linked native manager must be built first.");
+        string scratch = Directory.CreateTempSubdirectory("kicad-drc-restart-").FullName;
+        string projectDirectory = Directory.CreateDirectory(Path.Combine(scratch, "project")).FullName;
+        string project = Path.Combine(projectDirectory, "restart.kicad_pro");
+        string boardPath = Path.Combine(projectDirectory, "restart.kicad_pcb");
+        string socket = Path.Combine(scratch, "api.sock");
+        string mcpState = Path.Combine(scratch, "mcp-state");
+        string instanceId = Guid.NewGuid().ToString("D");
+        string operationId = Guid.NewGuid().ToString("D");
+        var captures = new List<Task>();
+        Process? native = null;
+        Process? replacement = null;
+
+        Process StartNative(string logName)
+        {
+            var start = new ProcessStartInfo(executable)
+            {
+                WorkingDirectory = projectDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            start.Environment["DISPLAY"] = display;
+            start.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
+            start.Environment["XDG_CONFIG_HOME"] = Path.Combine(scratch, "config");
+            start.Environment["XDG_CACHE_HOME"] = Path.Combine(scratch, "cache");
+            foreach (string argument in new[] { "--new", "--automation", instanceId, "--api-socket", socket,
+                "--automation-log", Path.Combine(evidence, logName), "--software-rendering", project })
+                start.ArgumentList.Add(argument);
+            var process = Process.Start(start)!;
+            captures.Add(Capture(process.StandardOutput, Path.Combine(evidence, logName + ".stdout.log")));
+            captures.Add(Capture(process.StandardError, Path.Combine(evidence, logName + ".stderr.log")));
+            return process;
+        }
+
+        async Task<NativeClient> Connect(Process process)
+        {
+            var client = new NativeClient(new NngTransport(), "ipc://" + socket);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(60));
+            while (true)
+            {
+                limit.Token.ThrowIfCancellationRequested();
+                Assert.IsFalse(process.HasExited, "The disposable KiCad process exited before serving DRC requests.");
+                try { await client.HandshakeAsync(limit.Token); return client; }
+                catch (NngException) { }
+                catch (NativeApiException error) when (error.Status is 4 or 7) { }
+                await Task.Delay(100, limit.Token);
+            }
+        }
+
+        try
+        {
+            await File.WriteAllTextAsync(project, "{\"meta\":{\"version\":3}}\n", token);
+            await File.WriteAllTextAsync(boardPath, MakeTwoProjectDrcBoard().Text, token);
+            native = StartNative("pcb-drc-restart-old-native.log");
+            NativeClient client = await Connect(native);
+            string oldEpoch = client.Epoch;
+            DocumentSpecifier board = (await client.OpenRootBoardAsync(boardPath, token)).Document;
+            DocumentLifecycleState baseline = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = board }, token);
+            JsonElement document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(board));
+
+            // Keep the MCP admission journal alive while the native process is
+            // killed, then reconnect a fresh MCP process to the same state.
+            await using (var firstMcp = await CancellableMcpClient.StartAsync(
+                mcpState, Path.Combine(evidence, "pcb-drc-restart-first-mcp.stderr.log"), token))
+            {
+                RequireToolSuccess(await firstMcp.Tool("kicad_instance_attach",
+                    new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                int settledSockets = await firstMcp.SettledSocketCount(token);
+                Assert.AreEqual(0, SignalProcess(native.Id, SigStop), "The disposable KiCad process could not be paused.");
+                await WaitUntil(() => ProcessState(native.Id) == 'T', "the disposable KiCad process to pause", token);
+                var pending = firstMcp.StartTool("kicad_pcb_drc_start", new
+                {
+                    instanceId,
+                    documentJson = SchematicJson.Formatter.Format(board),
+                    operationId,
+                    refillZones = false,
+                    reportAllTrackErrors = true,
+                    testFootprints = false,
+                    expectedRevisionJson = SchematicJson.Formatter.Format(baseline.Revision),
+                    processEpoch = oldEpoch
+                });
+                await WaitUntil(() => firstMcp.SocketCount() > settledSockets,
+                    "the MCP DRC request to reach the paused native process", token);
+                Assert.IsFalse(pending.Reply.IsCompleted, "The paused native process answered a DRC start.");
+                Assert.AreEqual(0, SignalProcess(native.Id, 9), "The disposable KiCad process could not be killed.");
+                await native.WaitForExitAsync(token);
+                JsonElement lost = await pending.Reply.WaitAsync(TimeSpan.FromSeconds(60), token);
+                JsonElement result = lost.GetProperty("result");
+                await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-drc-restart-lost-start.json"),
+                    lost.GetRawText(), token);
+                Assert.IsTrue(result.GetProperty("isError").GetBoolean(), lost.GetRawText());
+                string lostCode = result.GetProperty("structuredContent").GetProperty("code").GetString()!;
+                // The registry may observe the SIGKILL before the NNG exchange
+                // reports its transport loss and return instance_exited.  The
+                // DRC admission receipt is still marked Unknown by the MCP
+                // boundary; peers that report transport loss directly use the
+                // operation_outcome_unknown code.
+                Assert.IsTrue(lostCode is "instance_exited" or "operation_outcome_unknown", lost.GetRawText());
+            }
+
+            if (File.Exists(socket)) File.Delete(socket);
+            replacement = StartNative("pcb-drc-restart-replacement-native.log");
+            NativeClient replacementClient = await Connect(replacement);
+            Assert.AreNotEqual(oldEpoch, replacementClient.Epoch, "The replacement native process must have a new epoch.");
+            DocumentSpecifier replacementBoard = (await replacementClient.OpenRootBoardAsync(boardPath, token)).Document;
+            Assert.AreEqual(board, replacementBoard, "The replacement must reopen the same explicit PCB document.");
+            await using var reconnectMcp = await CancellableMcpClient.StartAsync(
+                mcpState, Path.Combine(evidence, "pcb-drc-restart-reconnect-mcp.stderr.log"), token);
+            RequireToolSuccess(await reconnectMcp.Tool("kicad_instance_attach",
+                new { endpoint = replacementClient.Endpoint, expectedInstanceId = instanceId }));
+            JsonElement receipt = await reconnectMcp.Tool("kicad_pcb_drc_operation_receipt", new
+            {
+                instanceId,
+                input = new { document, operationId, processEpoch = replacementClient.Epoch }
+            });
+            await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-drc-restart-receipt.json"),
+                receipt.GetRawText(), token);
+            RequireToolSuccess(receipt);
+            JsonElement receiptData = receipt.GetProperty("structuredContent");
+            Assert.IsTrue(receiptData.GetProperty("found").GetBoolean(), receipt.GetRawText());
+            Assert.AreEqual(oldEpoch, receiptData.GetProperty("durableProcessEpoch").GetString(), receipt.GetRawText());
+            Assert.AreEqual("Unknown", receiptData.GetProperty("outcome").GetString(), receipt.GetRawText());
+            Assert.IsFalse(receiptData.GetProperty("nativeReceiptAvailable").GetBoolean(), receipt.GetRawText());
+            Assert.AreEqual("unknown-native-outcome", receiptData.GetProperty("retrySafety").GetString(), receipt.GetRawText());
+
+            JsonElement lookup = await reconnectMcp.Tool("kicad_pcb_drc_operation_typed", new
+            {
+                instanceId,
+                input = new { document, operationId, processEpoch = replacementClient.Epoch }
+            });
+            await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-drc-restart-native-lookup-refused.json"),
+                lookup.GetRawText(), token);
+            Assert.IsTrue(lookup.GetProperty("isError").GetBoolean(), lookup.GetRawText());
+            Assert.AreEqual("stale_process_epoch",
+                lookup.GetProperty("structuredContent").GetProperty("code").GetString(), lookup.GetRawText());
+        }
+        finally
+        {
+            if (native is not null && !native.HasExited)
+            {
+                SignalProcess(native.Id, SigContinue);
+                native.Kill(entireProcessTree: true);
+            }
+            if (replacement is not null && !replacement.HasExited)
+                replacement.Kill(entireProcessTree: true);
+            if (native is not null) await native.WaitForExitAsync(CancellationToken.None);
+            if (replacement is not null) await replacement.WaitForExitAsync(CancellationToken.None);
+            try { await Task.WhenAll(captures).WaitAsync(TimeSpan.FromSeconds(10)); }
+            catch (OperationCanceledException) { }
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
     }
 

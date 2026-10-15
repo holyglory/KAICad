@@ -45,7 +45,7 @@ public sealed partial class SimulationTools
     });
 
     [McpServerTool(Name = "kicad_simulation_wait_typed", ReadOnly = true),
-     Description("Wait for the exact native simulation job to advance beyond afterSequence, using a structured schematic document, process epoch and job ID. Cancellation or the existing five-minute deadline remains an incomplete wait, never a completed simulation."),
+     Description("Wait for the exact native simulation job to advance beyond afterSequence, using a structured schematic document, process epoch and job ID. A matching terminal archive returns immediately after native or MCP restart, even at the final sequence. Cancellation or the existing five-minute deadline remains an incomplete wait, never a completed simulation."),
      KiCadCapability("simulation", "native-ngspice", "structured document, process epoch, job ID, sequence"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "SimulationTypedMcpProcessTests.TypedLifecyclePublishesSchemasAndRefusesInvalidBindings")]
     public Task<CallToolResult> WaitTyped(string instanceId, SimulationWaitInput input,

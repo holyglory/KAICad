@@ -257,7 +257,7 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
     });
 
     [McpServerTool(Name = "kicad_simulation_wait", ReadOnly = true),
-     Description("Wait for one exact native simulation job to change state. This targets only the simulator job, not the design; cancellation or timeout never becomes a successful result."),
+     Description("Wait for one exact native simulation job to change state. A matching immutable terminal archive is returned before contacting a current or replacement editor, including when afterSequence already reaches the final sequence. This targets only the simulator job, not the design; cancellation or timeout never becomes a successful result."),
      KiCadCapability("simulation", "native-ngspice", "instance epoch, document, job ID, sequence"),
      KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
     public async Task<CallToolResult> Wait(string instanceId, string expectedInstanceEpoch, SimulationDocumentInput document,
@@ -265,8 +265,21 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ValidateId(jobId, "job");
             var target = SimulationDocumentInput.ToNative(document);
+            // A terminal result remains final even when the original editor is
+            // gone or the caller has already observed its last sequence.
+            using (var ownership = receipts.AcquireSession(instanceId))
+            {
+                if (receipts.ReadTerminal(instanceId, expectedInstanceEpoch, jobId) is { } archive)
+                {
+                    if (!archive.Operation.Document.Equals(target))
+                        throw new AutomationException("simulation_result_not_found",
+                            "No terminal simulation archive matches that original schematic document.");
+                    return ArchivedData(archive, target);
+                }
+            }
             var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
             if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
                 throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");

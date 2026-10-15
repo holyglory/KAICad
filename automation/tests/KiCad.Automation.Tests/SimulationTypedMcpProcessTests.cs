@@ -162,6 +162,13 @@ public sealed class SimulationTypedMcpProcessTests
                 JsonElement replay = Data(await mcp.Tool("kicad_simulation_start_typed", new { instanceId, input = startInput }));
                 JsonElement archived = Data(await mcp.Tool("kicad_simulation_result_typed", new { instanceId, input = jobInput }));
                 Assert.AreEqual(replay.GetRawText(), archived.GetRawText(), "Identical starts must replay the original archive without a native instance.");
+                foreach (ulong afterSequence in new[] { 0UL, job.Sequence, ulong.MaxValue })
+                {
+                    JsonObject waitInput = jobInput.DeepClone().AsObject(); waitInput["afterSequence"] = afterSequence;
+                    JsonElement waited = Data(await mcp.Tool("kicad_simulation_wait_typed", new { instanceId, input = waitInput }));
+                    Assert.AreEqual(archived.GetRawText(), waited.GetRawText(),
+                        "A terminal wait retry must return the original archive without contacting a native instance, regardless of its last observed sequence.");
+                }
                 JsonElement cancelled = Data(await mcp.Tool("kicad_simulation_cancel_typed", new { instanceId, input = jobInput }));
                 Assert.AreEqual(archived.GetRawText(), cancelled.GetRawText(),
                     "A late cancellation retry must replay the exact terminal archive without contacting a native instance.");
@@ -204,6 +211,7 @@ public sealed class SimulationTypedMcpProcessTests
                 AssertError(await mcp.Tool("kicad_simulation_result_typed", new { instanceId, input = replacementEpoch }), "simulation_result_not_found");
                 JsonObject wrongSheet = jobInput.DeepClone().AsObject(); wrongSheet["document"]!["sheetPath"]!["path"]![1]!["value"] = Guid.NewGuid().ToString("D");
                 AssertError(await mcp.Tool("kicad_simulation_result_typed", new { instanceId, input = wrongSheet }), "simulation_result_not_found");
+                AssertError(await mcp.Tool("kicad_simulation_wait_typed", new { instanceId, input = wrongSheet }), "simulation_result_not_found");
                 JsonObject changedDeck = startInput.DeepClone().AsObject(); changedDeck["netlist"] = deck.Replace("DC 5", "DC 6", StringComparison.Ordinal);
                 AssertError(await mcp.Tool("kicad_simulation_start_typed", new { instanceId, input = changedDeck }), "simulation_operation_reused");
             }

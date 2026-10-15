@@ -42,7 +42,7 @@ def require_fields(value: dict, expected: dict, label: str) -> None:
 
 
 def main() -> None:
-    request_path = Path(required("KICAD_PREVIEW_REQUEST"))
+    request_path = Path(os.environ.get("KICAD_PREVIEW_REQUEST", "/mnt/build-storage/codex/kicad/delivery/preview28/request.json"))
     request = load(request_path)
     evidence = Path(os.environ.get("KICAD_DELIVERY_EVIDENCE",
                                   ROOT / "automation/artifacts/preview28-linux-delivery"))
@@ -125,6 +125,11 @@ def main() -> None:
         ],
     }
     (evidence / "completion.json").write_text(json.dumps(completion, indent=2) + "\n")
+    check = subprocess.run([
+        "devcoordinator2", "completion", "check", "--file", str(evidence / "completion.json"), str(ROOT)
+    ], text=True, capture_output=True, check=False)
+    if check.returncode != 0:
+        raise RuntimeError("Completion inventory rejected: " + check.stdout[-2000:])
     print(json.dumps({"status": "passed", "sequence": request["sequence"],
                       "commit": request["commit"], "source_sha256": source_sha256,
                       "verification": str(evidence / "Verification"),

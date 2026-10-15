@@ -27,6 +27,10 @@ def required(name: str) -> str:
     return value
 
 
+def configured(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
 def read_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
@@ -48,14 +52,14 @@ def run(command: list[str]) -> None:
 
 
 def main() -> None:
-    candidate_root = Path(required("KICAD_PUBLIC_CANDIDATE_ROOT"))
-    previous_root = Path(required("KICAD_PREVIOUS_PUBLIC_ROOT"))
-    request_path = Path(required("KICAD_PREVIEW_REQUEST"))
+    candidate_root = Path(configured("KICAD_PUBLIC_CANDIDATE_ROOT", "/mnt/build-storage/codex/kicad/public-candidates"))
+    previous_root = Path(configured("KICAD_PREVIOUS_PUBLIC_ROOT", "/mnt/build-storage/codex/kicad/public-candidates/win-e40-full-signed-000012"))
+    request_path = Path(configured("KICAD_PREVIEW_REQUEST", "/mnt/build-storage/codex/kicad/delivery/preview28/request.json"))
     evidence_root = Path(os.environ.get("KICAD_PREVIEW_PUBLISH_EVIDENCE",
                                        ROOT / "automation/artifacts/preview28-publish"))
-    sequence = int(required("KICAD_PREVIEW_SEQUENCE"))
-    publisher_private = Path(required("KICAD_PUBLISHER_PRIVATE"))
-    publisher_public = Path(required("KICAD_PUBLISHER_PUBLIC"))
+    sequence = int(configured("KICAD_PREVIEW_SEQUENCE", "28"))
+    publisher_private = Path(configured("KICAD_PUBLISHER_PRIVATE", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8"))
+    publisher_public = Path(configured("KICAD_PUBLISHER_PUBLIC", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"))
     if request_path.exists():
         raise RuntimeError(f"Refusing to overwrite an existing delivery request: {request_path}")
     if not candidate_root.is_dir() or not previous_root.is_dir():
@@ -144,8 +148,8 @@ def main() -> None:
         "linux_artifact": linux_artifact,
         "source_artifact": source_artifact,
         "publisher_public": str(publisher_public),
-        "public_url": required("KICAD_PUBLIC_DOWNLOAD_URL"),
-        "deployment_id": required("KICAD_DELIVERY_DEPLOYMENT"),
+        "public_url": configured("KICAD_PUBLIC_DOWNLOAD_URL", "https://kicad.vr.ae/"),
+        "deployment_id": configured("KICAD_DELIVERY_DEPLOYMENT", "d30d9eeb63ffeccbc"),
         "published_candidate_at_ms": int(time.time() * 1000),
     }
     request_path.parent.mkdir(parents=True, exist_ok=True)

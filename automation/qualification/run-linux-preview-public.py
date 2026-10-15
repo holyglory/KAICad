@@ -31,7 +31,7 @@ def run(command: list[str], environment: dict[str, str]) -> None:
 
 
 def main() -> None:
-    request = json.loads(Path(required("KICAD_PREVIEW_REQUEST")).read_text())
+    request = json.loads(Path(os.environ.get("KICAD_PREVIEW_REQUEST", "/mnt/build-storage/codex/kicad/delivery/preview28/request.json")).read_text())
     signed_root = Path(request["signed_root"])
     previous_root = Path(request["previous_root"])
     evidence = Path(os.environ.get("KICAD_DELIVERY_EVIDENCE",
@@ -39,7 +39,7 @@ def main() -> None:
     evidence.mkdir(parents=True, exist_ok=True)
     started_at_ms = int(time.time() * 1000)
     request["public_started_at_ms"] = started_at_ms
-    Path(required("KICAD_PREVIEW_REQUEST")).write_text(json.dumps(request, indent=2) + "\n")
+    Path(os.environ.get("KICAD_PREVIEW_REQUEST", "/mnt/build-storage/codex/kicad/delivery/preview28/request.json")).write_text(json.dumps(request, indent=2) + "\n")
 
     origin = request["public_url"].rstrip("/") + "/"
     with urllib.request.urlopen(origin + "healthz", timeout=20) as response:
@@ -75,6 +75,7 @@ def main() -> None:
          "--logger", "trx;LogFileName=results.trx", "--results-directory",
          str(evidence / "updater-tests"), "--", "MSTest.MapInconclusiveToFailed=true",
          "MSTest.Parallelize.Workers=1"], environment)
+    run(["python3", "automation/qualification/observe-linux-preview.py"], environment)
     print(json.dumps({"status": "passed", "commit": request["commit"],
                       "source_sha256": request["source_sha256"],
                       "started_at_ms": started_at_ms, "evidence": str(evidence)}, indent=2))

@@ -16,6 +16,47 @@ namespace KiCad.Automation.Tests;
 public sealed class PcbExportRecoveryTests
 {
     [TestMethod]
+    public void DurableReceiptViewExposesUnknownMcpStateWithoutRedispatchPermission()
+    {
+        var record = Record(PcbExportRecoveryPolicy.Indeterminate, nativeDispatchKnown: true,
+            nativeDispatch: true);
+        JsonElement view = PcbJobTools.DurableReceiptView(record.InstanceId, record.ProcessEpoch,
+            record.OperationId, record, receipt: null);
+
+        Assert.IsFalse(view.GetProperty("found").GetBoolean());
+        Assert.IsFalse(view.GetProperty("nativeReceiptFound").GetBoolean());
+        Assert.AreEqual("mcp-state", view.GetProperty("receiptScope").GetString());
+        Assert.AreEqual(PcbExportRecoveryPolicy.Indeterminate, view.GetProperty("status").GetString());
+        Assert.AreEqual(PcbExportRecoveryPolicy.Unknown, view.GetProperty("outcome").GetString());
+        Assert.IsFalse(view.GetProperty("retryAllowed").GetBoolean());
+        Assert.IsTrue(view.GetProperty("publicationMayHaveHappened").GetBoolean());
+        Assert.IsTrue(view.GetProperty("receipt").ValueKind == JsonValueKind.Null);
+    }
+
+    [TestMethod]
+    public void DurableCompletedReceiptViewKeepsTerminalOutcomeAndReceiptScope()
+    {
+        var record = Record(PcbExportRecoveryPolicy.Completed, nativeDispatchKnown: true,
+            nativeDispatch: true);
+        var receipt = new PcbManufacturingExportReceipt
+        {
+            OperationId = record.OperationId,
+            ProcessEpoch = record.ProcessEpoch,
+            RequestFingerprintSha256 = record.RequestFingerprintSha256,
+            Status = PcbManufacturingExportStatus.PcbMfgExportCompleted,
+            NativeDispatch = true,
+            Terminal = true
+        };
+        JsonElement view = PcbJobTools.DurableReceiptView(record.InstanceId, record.ProcessEpoch,
+            record.OperationId, record, receipt);
+
+        Assert.AreEqual(PcbExportRecoveryPolicy.Completed, view.GetProperty("status").GetString());
+        Assert.AreEqual(PcbExportRecoveryPolicy.OutcomeCompleted, view.GetProperty("outcome").GetString());
+        Assert.IsFalse(view.GetProperty("retryAllowed").GetBoolean());
+        Assert.AreEqual(JsonValueKind.Object, view.GetProperty("receipt").ValueKind);
+    }
+
+    [TestMethod]
     public void TerminalFailureWithoutOwnedPathsIsRetryable()
     {
         var prior = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: true, nativeDispatch: true);

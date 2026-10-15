@@ -136,6 +136,26 @@ internal static class PcbExportRecoveryPolicy
         return nativeDispatch ? Unknown : Submitted;
     }
 
+    /// <summary>
+    /// Maps durable MCP state to the same bounded outcome vocabulary used by
+    /// live native receipts. A missing native receipt never becomes a success
+    /// claim; callers expose this as MCP state with no redispatch permission
+    /// unless the durable record proves a pre-dispatch retryable result.
+    /// </summary>
+    internal static string DurableOutcome(PcbExportRecoveryRecord record,
+        PcbManufacturingExportReceipt? receipt)
+    {
+        if (receipt is not null)
+            return record.Status == Completed ? OutcomeCompleted : Outcome(receipt, receipt.NativeDispatch);
+        return record.Status switch
+        {
+            Cancelled => Cancelled,
+            Retryable => Failed,
+            Completed => Unknown,
+            _ => Unknown
+        };
+    }
+
     internal static string StagingDirectory(string outputDirectory, string operationId)
     {
         string output = Path.GetFullPath(outputDirectory);

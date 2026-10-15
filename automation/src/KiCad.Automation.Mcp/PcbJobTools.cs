@@ -21,6 +21,32 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed partial class PcbJobTools(InstanceRegistry registry)
 {
+    internal static JsonElement DurableReceiptView(string instanceId, string processEpoch,
+        string operationId, PcbExportRecoveryRecord record,
+        PcbManufacturingExportReceipt? receipt)
+    {
+        JsonElement? receiptJson = receipt is null
+            ? null
+            : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
+        return JsonSerializer.SerializeToElement(new
+        {
+            instanceId,
+            processEpoch,
+            operationId,
+            found = false,
+            nativeReceiptFound = false,
+            receiptScope = "mcp-state",
+            status = record.Status,
+            outcome = PcbExportRecoveryPolicy.DurableOutcome(record, receipt),
+            retryAllowed = record.Status is PcbExportRecoveryPolicy.Retryable
+                or PcbExportRecoveryPolicy.Cancelled,
+            publicationMayHaveHappened = record.PublicationMayHaveHappened,
+            requestFingerprintSha256 = record.RequestFingerprintSha256,
+            receipt = receiptJson,
+            reason = "The native receipt was absent; this exact durable MCP recovery state is returned without redispatch."
+        });
+    }
+
     [McpServerTool(Name = "kicad_pcb_export", ReadOnly = false),
      Description("Run exactly one typed native PCB manufacturing export into a new absolute outputDirectory. Supply an explicit operationId, typed document and complete lifecycle observation, plus exactly one concrete job setting (3D, render, SVG, DXF, PDF, PostScript, Gerbers, drill, position, GenCAD, IPC-2581, IPC-D-356, ODB++ or board statistics). KiCad stages and atomically publishes the directory without replacing existing files. Reuse the same operationId after a lost reply; cancellation never claims native cancellation."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-task-export", "typed operation ID, explicit document, complete lifecycle state, owned output directory, native receipt"),
@@ -139,10 +165,10 @@ public sealed partial class PcbJobTools(InstanceRegistry registry)
                 OperationId = operationId,
                 ProcessEpoch = processEpoch
             }, cancellationToken);
+        var recovery = new PcbExportRecoveryStore(registry.StateDirectory);
         if (response.Found)
         {
             PcbManufacturingContract.ValidateReceipt(response.Receipt, document, null, operationId, processEpoch);
-            var recovery = new PcbExportRecoveryStore(registry.StateDirectory);
             if (recovery.Read(operationId) is { } record)
             {
                 PcbExportRecoveryPolicy.ValidateReceiptBinding(record, instanceId, processEpoch,
@@ -156,6 +182,24 @@ public sealed partial class PcbJobTools(InstanceRegistry registry)
                     PcbExportRecoveryPolicy.OutputMatches(response.Receipt),
                     Directory.Exists(response.Receipt.StagingDirectory));
             }
+        }
+        else if (recovery.Read(operationId) is { } durable)
+        {
+            PcbExportRecoveryPolicy.ValidateReceiptBinding(durable, instanceId, processEpoch,
+                SchematicJson.Formatter.Format(document));
+            PcbManufacturingExportReceipt? cached = durable.ReceiptJson is null
+                ? null : PcbExportRecoveryStore.ParseReceipt(durable);
+            if (cached is not null && durable.Status == PcbExportRecoveryPolicy.Completed
+                && !PcbExportRecoveryPolicy.OutputMatches(cached))
+            {
+                var decision = PcbExportRecoveryPolicy.Reconcile(durable, false, cached,
+                    Directory.Exists(durable.OutputDirectory), outputVerified: false,
+                    Directory.Exists(durable.StagingDirectory));
+                durable = recovery.ApplyDecision(operationId, decision);
+                cached = durable.ReceiptJson is null ? null : PcbExportRecoveryStore.ParseReceipt(durable);
+            }
+            return Data(PcbJobTools.DurableReceiptView(instanceId, session.Epoch,
+                operationId, durable, cached));
         }
         JsonElement? receiptJson = response.Found
             ? JsonDocument.Parse(SchematicJson.Formatter.Format(response.Receipt)).RootElement.Clone()

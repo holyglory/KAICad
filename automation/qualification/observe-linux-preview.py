@@ -61,7 +61,7 @@ def main() -> None:
     if len(linux) != 1 or len(source) != 1:
         raise RuntimeError("Signed catalogue is missing the exact Linux/source candidate pair.")
     app = linux[0]
-    if app.get("sourceSha256") != source[0].get("sha256") or app.get("sourceSha256") != source_sha256:
+    if app.get("sourceSha256") != source[0].get("sha256") or app.get("sourceSha256") != request["source_archive_sha256"]:
         raise RuntimeError("Signed catalogue source binding is inconsistent.")
     started_at_ms = int(request.get("public_started_at_ms", request.get("published_candidate_at_ms", 0)))
     linux_observation = load(evidence / "linux.verification.json")

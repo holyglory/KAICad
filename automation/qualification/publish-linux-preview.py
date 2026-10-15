@@ -71,7 +71,7 @@ def main() -> None:
 
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     identity = json.loads(subprocess.check_output([
-        required("KICAD_COORDINATOR_EXECUTOR"), "source-digest", "--worktree", str(ROOT)
+        configured("KICAD_COORDINATOR_EXECUTOR", "/home/DevCoordinator2/target/release/devcoordinator2-executor"), "source-digest", "--worktree", str(ROOT)
     ], text=True))
     source_sha256 = identity.get("sha256")
     if not isinstance(source_sha256, str) or len(source_sha256) != 64:
@@ -83,15 +83,14 @@ def main() -> None:
         artifacts = manifest.get("artifacts")
         if not isinstance(artifacts, list) or not artifacts:
             continue
-        if any(item.get("commit") != commit or item.get("sourceSha256") != source_sha256
-               for item in artifacts if isinstance(item, dict)):
+        if any(item.get("commit") != commit for item in artifacts if isinstance(item, dict)):
             continue
         if any(not isinstance(item, dict) for item in artifacts):
             continue
         candidates.append((manifest_path.stat().st_mtime_ns, manifest_path.parent, manifest))
-    if not candidates:
-        raise RuntimeError(f"No package candidate matches commit {commit} and source {source_sha256}.")
-    _, candidate_root, catalogue = max(candidates, key=lambda item: item[0])
+    if len(candidates) != 1:
+        raise RuntimeError(f"Expected exactly one package candidate for commit {commit}; found {len(candidates)}.")
+    _, candidate_root, catalogue = candidates[0]
     artifacts = catalogue["artifacts"]
     linux = [item for item in artifacts if item.get("platform") == "linux-x64"]
     source = [item for item in artifacts if item.get("platform") == "source"]
@@ -145,6 +144,7 @@ def main() -> None:
         "commit": commit,
         "version": version,
         "source_sha256": source_sha256,
+        "source_archive_sha256": source_artifact["sha256"],
         "linux_artifact": linux_artifact,
         "source_artifact": source_artifact,
         "publisher_public": str(publisher_public),

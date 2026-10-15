@@ -89,27 +89,40 @@ public sealed class MacRetainedPackageTests
 
             string root = FindRepository();
             string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
-            string managedEvidence = Directory.CreateDirectory(Path.Combine(evidence, "managed-run")).FullName;
-            ProcessResult managed = await RunProcess("managed-recovery", "dotnet", ["test", "KiCad.Automation.slnx",
-                "--configuration", configuration, "--no-build", "--no-restore", "--filter",
-                "FullyQualifiedName~PcbExportRecoveryTests", "--logger", "trx",
-                "--results-directory", managedEvidence], deadline.Token, root);
-            await File.WriteAllTextAsync(Path.Combine(evidence, "managed-run.stdout.log"), managed.Stdout, deadline.Token);
-            await File.WriteAllTextAsync(Path.Combine(evidence, "managed-run.stderr.log"), managed.Stderr, deadline.Token);
-            Assert.AreEqual(0, managed.ExitCode, managed.Stderr + managed.Stdout);
-            string[] managedTrx = Directory.GetFiles(managedEvidence, "*.trx");
-            Assert.HasCount(1, managedTrx);
-            MacRequalifiedPreview.RequirePassingTests(await File.ReadAllBytesAsync(managedTrx[0], deadline.Token),
-                "PcbExportRecoveryTests");
-
             bool managedSourceUnchanged = (await RunProcess("managed-source-diff", "git",
                 ["diff", "--quiet", frozen.Commit, "HEAD", "--", "automation/src"], deadline.Token, root)).ExitCode == 0;
+            bool managedRecoveryPassed = false;
+            if (!managedSourceUnchanged)
+            {
+                string managedEvidence = Directory.CreateDirectory(Path.Combine(evidence, "managed-run")).FullName;
+                ProcessResult managed = await RunProcess("managed-recovery", "dotnet", ["test", "KiCad.Automation.slnx",
+                    "--configuration", configuration, "--no-build", "--no-restore", "--filter",
+                    "FullyQualifiedName~PcbExportRecoveryTests", "--logger", "trx",
+                    "--results-directory", managedEvidence], deadline.Token, root);
+                await File.WriteAllTextAsync(Path.Combine(evidence, "managed-run.stdout.log"), managed.Stdout, deadline.Token);
+                await File.WriteAllTextAsync(Path.Combine(evidence, "managed-run.stderr.log"), managed.Stderr, deadline.Token);
+                Assert.AreEqual(0, managed.ExitCode, managed.Stderr + managed.Stdout);
+                string[] managedTrx = Directory.GetFiles(managedEvidence, "*.trx");
+                Assert.HasCount(1, managedTrx);
+                MacRequalifiedPreview.RequirePassingTests(await File.ReadAllBytesAsync(managedTrx[0], deadline.Token),
+                    "PcbExportRecoveryTests");
+                managedRecoveryPassed = true;
+            }
+            else
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, "managed-recovery-unavailable.json"), JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1, sourceCommit = frozen.Commit,
+                    reason = "The checkout is the original failed source; current recovery tests were not available without silently using stale fixtures."
+                }), deadline.Token);
+            }
             await File.WriteAllTextAsync(Path.Combine(evidence, "inputs.json"), JsonSerializer.Serialize(new
             {
                 schemaVersion = 1, sourceCommit = frozen.Commit, archiveSha256 = hash, archiveBytes = input.Length,
                 originalRunId = frozen.RunId, originalRunAttempt = frozen.Attempt,
                 originalArtifactName = frozen.ArtifactName, rebuiltNativeCode = false,
                 managedRuntimeSourceUnchanged = managedSourceUnchanged,
+                managedRecoveryAvailable = managedRecoveryPassed,
                 nativeEditorJourneyAvailable = false, crashUndoJourneyAvailable = false
             }), deadline.Token);
             await File.WriteAllBytesAsync(Path.Combine(evidence, "original-receipt.json"), receiptBytes, deadline.Token);
@@ -121,7 +134,7 @@ public sealed class MacRetainedPackageTests
                 nativeEditorJourneyAvailable = false, crashUndoJourneyAvailable = false,
                 crashUndoClosed = false, rebuiltNativeCode = false, originalReceiptUnchanged =
                     receiptBytes.AsSpan().SequenceEqual(freshReceiptBytes),
-                currentManagedRecoveryPassed = true, managedRuntimeSourceUnchanged = managedSourceUnchanged,
+                currentManagedRecoveryPassed = managedRecoveryPassed, managedRuntimeSourceUnchanged = managedSourceUnchanged,
                 publiclyPublishable = false, qualifyingDelivery = false,
                 limitation = "No existing Mac package journey drives live PCB inline drag, undo or redo; the crash closure remains unavailable."
             }), deadline.Token);

@@ -1050,6 +1050,15 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
 
     JournalRecord candidate = *current;
     candidate.mutable_receipt()->CopyFrom( *dispatched );
+    // Existing owner-thread adapters return their historical receipt fields and
+    // do not know about the immutable source handoff. Preserve that admission
+    // evidence when the adapter omits it; a supplied snapshot is checked below
+    // for exact equality and cannot replace the admitted source.
+    if( candidate.receipt().source_snapshot().serialized_board().empty() )
+        candidate.mutable_receipt()->mutable_source_snapshot()->CopyFrom( current->receipt().source_snapshot() );
+    if( candidate.receipt().source_snapshot_sha256().empty() )
+        candidate.mutable_receipt()->set_source_snapshot_sha256(
+                current->receipt().source_snapshot_sha256() );
     if( aDetachedWorker )
     {
         candidate.mutable_receipt()->set_worker_started( true );

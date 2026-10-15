@@ -112,7 +112,13 @@ public sealed class RecoveryTools
         catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException or ArgumentException)
         {
             var data = JsonSerializer.SerializeToElement(new { instanceId,
-                errorCode = error is AutomationException known ? known.Code : "design_sync_io", errorMessage = error.Message });
+                errorCode = error switch
+                {
+                    AutomationException known => known.Code,
+                    NativeApiException native => "native_status_" + native.Status,
+                    NngException transport => "transport_status_" + transport.ErrorCode,
+                    _ => "design_sync_io"
+                }, errorMessage = error.Message });
             return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
         }
     }

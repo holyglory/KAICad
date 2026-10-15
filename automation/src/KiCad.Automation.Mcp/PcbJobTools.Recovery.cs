@@ -217,7 +217,7 @@ public sealed partial class PcbJobTools
             || !result.SynchronousIpc2581ExportSupported
             || !result.AdmissionSupported || !result.RequestJournalSupported || !result.JournalReadSupported
             || !result.PublishedOutputsVerificationSupported
-            || result.DetachedExportSupported || result.PublicationSupported || result.CompleteSnapshotSupported )
+            || result.DetachedExportSupported || result.PublicationSupported )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native manager capability response did not bind the requested PCB and process epoch.");
         return Data(new { instanceId, processEpoch = session.Epoch,

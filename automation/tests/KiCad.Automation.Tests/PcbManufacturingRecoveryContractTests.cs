@@ -1,9 +1,11 @@
 using System.Text.Json;
 using Google.Protobuf;
+using Kiapi.Common;
 using Kiapi.Board.Jobs;
 using Kiapi.Common.Commands;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -12,6 +14,22 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class PcbManufacturingRecoveryContractTests
 {
+    [TestMethod]
+    public void RecoveryBoundaryPreservesNativeAndTransportErrorIdentity()
+    {
+        Assert.AreEqual("native_status_3",
+            PcbJobTools.RecoveryErrorCode(new NativeApiException(3, "wrong document")));
+        Assert.AreEqual(PcbExportRecoveryPolicy.RecoveryUnavailable,
+            PcbJobTools.RecoveryErrorCode(new NativeApiException((int)ApiStatusCode.AsUnimplemented,
+                "manager unavailable")));
+        Assert.AreEqual("transport_status_5",
+            PcbJobTools.RecoveryErrorCode(new NngException(5, "lost reply", requestDelivered: true)));
+        Assert.AreEqual("domain_failure",
+            PcbJobTools.RecoveryErrorCode(new AutomationException("domain_failure", "invalid request")));
+        Assert.AreEqual("pcb_export_recovery_failed",
+            PcbJobTools.RecoveryErrorCode(new InvalidOperationException("unexpected")));
+    }
+
     [TestMethod]
     public void ManagerCapabilitiesExposeSynchronousOwnerThreadSupportSeparatelyFromDetachedRecovery()
     {

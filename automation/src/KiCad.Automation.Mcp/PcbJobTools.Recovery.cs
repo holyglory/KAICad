@@ -260,6 +260,16 @@ public sealed partial class PcbJobTools
                 ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Receipt)) : (JsonElement?)null });
     }, input?.OperationId, input?.ProcessEpoch);
 
+    internal static string RecoveryErrorCode(Exception error) => error switch
+    {
+        AutomationException known => known.Code,
+        NativeApiException native when native.Status == (int)ApiStatusCode.AsUnimplemented
+            => PcbExportRecoveryPolicy.RecoveryUnavailable,
+        NativeApiException native => "native_status_" + native.Status,
+        NngException transport => "transport_status_" + transport.ErrorCode,
+        _ => "pcb_export_recovery_failed"
+    };
+
     private static async Task<CallToolResult> ExecuteRecovery(Func<Task<CallToolResult>> operation,
         string? operationId, string? processEpoch)
     {
@@ -279,10 +289,7 @@ public sealed partial class PcbJobTools
             or NngException or JsonException or InvalidOperationException or ArgumentException
             or InvalidProtocolBufferException or InvalidJsonException or IOException)
         {
-            string code = error is AutomationException known ? known.Code
-                : error is NativeApiException native && native.Status == (int)ApiStatusCode.AsUnimplemented
-                    ? PcbExportRecoveryPolicy.RecoveryUnavailable
-                    : "pcb_export_recovery_failed";
+            string code = RecoveryErrorCode(error);
             return Data(new
             {
                 operationId, processEpoch, recoverySupported = false,

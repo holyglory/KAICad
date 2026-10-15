@@ -488,9 +488,15 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             return false;
         string[] expectedIds = itemIds.Distinct(StringComparer.Ordinal).OrderBy(id => id, StringComparer.Ordinal).ToArray();
         DeleteItemsResponse deleted = receipt.Results[0].Delete;
+        // A deletion response can carry an item identity even when native
+        // rejected that individual deletion.  Treat the rollback as
+        // unconfirmed unless every requested item explicitly reports success;
+        // matching IDs and a restored lifecycle hash alone do not prove that
+        // the committed artwork was removed.
+        if (deleted.DeletedItems.Any(item => item.Status != ItemDeletionStatus.IdsOk || item.Id is null))
+            return false;
         string[] actualIds = deleted.DeletedItems
-            .Where(item => item.Id is not null)
-            .Select(item => item.Id.Value)
+            .Select(item => item.Id!.Value)
             .OrderBy(id => id, StringComparer.Ordinal).ToArray();
         if (!expectedIds.SequenceEqual(actualIds, StringComparer.Ordinal)) return false;
         DocumentLifecycleState restored = receipt.ObservedAfter;

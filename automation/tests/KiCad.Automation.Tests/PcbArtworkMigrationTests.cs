@@ -194,6 +194,12 @@ public sealed class PcbArtworkMigrationTests
         Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
             [firstId]));
 
+        receipt.Results[0].Delete.DeletedItems[0].Status =
+            (ItemDeletionStatus)((int)ItemDeletionStatus.IdsOk + 1);
+        Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
+            [firstId, secondId]),
+            "A matching item ID with a failed delete status must not prove rollback.");
+        receipt.Results[0].Delete.DeletedItems[0].Status = ItemDeletionStatus.IdsOk;
         receipt.ObservedAfter.StateSha256 = new string('c', 64);
         Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
             [firstId, secondId]));

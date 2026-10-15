@@ -104,9 +104,15 @@ public static class CheckedProjectNetClassesContract
 
         if (result.State == CheckedProjectNetClassesState.CpcsNotFound)
         {
-            if (!inspect || result.RequestVerified || result.Replayed || result.BeforeNetClasses is not null
+            if (!inspect || result.RequestVerified || result.Replayed
+                || result.BeforeNetClassesSha256.Length != 0 || result.AfterNetClassesSha256.Length != 0
+                || result.BeforeNetClasses is not null
                 || result.AfterNetClasses is not null || result.ObservedBefore is not null
                 || result.ObservedRollback is not null || result.ObservedAfter is not null
+                || result.Phase != CheckedProjectNetClassesPhase.CpcpUnknown
+                || result.RollbackState != CheckedProjectNetClassesRollbackState.CpcrsNotAttempted
+                || result.PostCommitState != CheckedProjectNetClassesPostCommitState.CpcpsNotAttempted
+                || result.DesignFilesSaved || result.ReloadVerified || result.UndoRedoSupported
                 || result.ErrorCode.Length != 0 || result.ErrorMessage.Length != 0)
                 throw Invalid("A missing project netclass receipt is inspection-only and cannot claim a result.");
             return;
@@ -114,11 +120,17 @@ public static class CheckedProjectNetClassesContract
 
         if (result.State == CheckedProjectNetClassesState.CpcsUnavailable)
         {
-            if (result.RequestVerified || result.Replayed || result.BeforeNetClasses is not null
+            if (result.RequestVerified
+                || result.BeforeNetClassesSha256.Length != 0 || result.AfterNetClassesSha256.Length != 0
+                || result.BeforeNetClasses is not null
                 || result.AfterNetClasses is not null || result.ObservedBefore is not null
                 || result.ObservedRollback is not null || result.ObservedAfter is not null
+                || result.Phase != CheckedProjectNetClassesPhase.CpcpUnknown
+                || result.RollbackState != CheckedProjectNetClassesRollbackState.CpcrsNotAttempted
+                || result.PostCommitState != CheckedProjectNetClassesPostCommitState.CpcpsNotAttempted
                 || result.DesignFilesSaved || result.ReloadVerified || result.UndoRedoSupported
-                || !string.Equals(result.ErrorCode, "project_settings_checked_unavailable", StringComparison.Ordinal))
+                || !string.Equals(result.ErrorCode, "project_settings_checked_unavailable", StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(result.ErrorMessage))
                 throw Invalid("An unavailable project netclass owner cannot claim mutation or recovery evidence.");
             return;
         }

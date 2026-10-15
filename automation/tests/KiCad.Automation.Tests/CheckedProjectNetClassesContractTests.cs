@@ -52,6 +52,8 @@ public sealed class CheckedProjectNetClassesContractTests
             Project = request.Project.Clone(), Document = request.Document.Clone(),
             ProcessEpoch = request.ProcessEpoch, OperationId = request.OperationId,
             State = CheckedProjectNetClassesState.CpcsUnavailable,
+            RollbackState = CheckedProjectNetClassesRollbackState.CpcrsNotAttempted,
+            PostCommitState = CheckedProjectNetClassesPostCommitState.CpcpsNotAttempted,
             ErrorCode = "project_settings_checked_unavailable",
             ErrorMessage = "The native owner is unavailable."
         };
@@ -61,6 +63,61 @@ public sealed class CheckedProjectNetClassesContractTests
         forged.UndoRedoSupported = true;
         Assert.ThrowsExactly<AutomationException>(() =>
             CheckedProjectNetClassesContract.ValidateResult(request, forged, inspect: false));
+    }
+
+    [TestMethod]
+    public void UnavailableReplayRetainsOnlyTheNoMutationDiagnostic()
+    {
+        (CheckedProjectNetClassesTransaction request, _) = Request();
+        var unavailable = new CheckedProjectNetClassesReceipt
+        {
+            Project = request.Project.Clone(), Document = request.Document.Clone(),
+            ProcessEpoch = request.ProcessEpoch, OperationId = request.OperationId,
+            State = CheckedProjectNetClassesState.CpcsUnavailable,
+            RollbackState = CheckedProjectNetClassesRollbackState.CpcrsNotAttempted,
+            PostCommitState = CheckedProjectNetClassesPostCommitState.CpcpsNotAttempted,
+            ErrorCode = "project_settings_checked_unavailable",
+            ErrorMessage = "The native owner is unavailable."
+        };
+
+        unavailable.Replayed = true;
+        CheckedProjectNetClassesContract.ValidateResult(request, unavailable, inspect: false);
+
+        var forged = unavailable.Clone();
+        forged.Phase = CheckedProjectNetClassesPhase.CpcpComplete;
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedProjectNetClassesContract.ValidateResult(request, forged, inspect: false));
+
+        forged = unavailable.Clone();
+        forged.AfterNetClassesSha256 = new string('a', 64);
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedProjectNetClassesContract.ValidateResult(request, forged, inspect: false));
+    }
+
+    [TestMethod]
+    public void MissingReceiptCannotClaimLifecycleOrRecoveryEvidence()
+    {
+        (CheckedProjectNetClassesTransaction request, _) = Request();
+        var missing = new CheckedProjectNetClassesReceipt
+        {
+            Project = request.Project.Clone(), Document = request.Document.Clone(),
+            ProcessEpoch = request.ProcessEpoch, OperationId = request.OperationId,
+            State = CheckedProjectNetClassesState.CpcsNotFound,
+            RollbackState = CheckedProjectNetClassesRollbackState.CpcrsNotAttempted,
+            PostCommitState = CheckedProjectNetClassesPostCommitState.CpcpsNotAttempted
+        };
+
+        CheckedProjectNetClassesContract.ValidateResult(request, missing, inspect: true);
+
+        var forged = missing.Clone();
+        forged.RollbackState = CheckedProjectNetClassesRollbackState.CpcrsConfirmed;
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedProjectNetClassesContract.ValidateResult(request, forged, inspect: true));
+
+        forged = missing.Clone();
+        forged.UndoRedoSupported = true;
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedProjectNetClassesContract.ValidateResult(request, forged, inspect: true));
     }
 
     [TestMethod]

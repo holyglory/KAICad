@@ -211,7 +211,7 @@ public sealed class SimulationTypedMcpProcessTests
                 AssertError(await mcp.Tool("kicad_simulation_result_typed", new { instanceId, input = replacementEpoch }), "simulation_result_not_found");
                 JsonObject wrongSheet = jobInput.DeepClone().AsObject(); wrongSheet["document"]!["sheetPath"]!["path"]![1]!["value"] = Guid.NewGuid().ToString("D");
                 AssertError(await mcp.Tool("kicad_simulation_result_typed", new { instanceId, input = wrongSheet }), "simulation_result_not_found");
-                AssertError(await mcp.Tool("kicad_simulation_wait_typed", new { instanceId, input = wrongSheet }), "simulation_result_not_found");
+                AssertError(await mcp.Tool("kicad_simulation_wait_typed", new { instanceId, input = wrongSheet }), "simulation_wait_incomplete");
                 JsonObject changedDeck = startInput.DeepClone().AsObject(); changedDeck["netlist"] = deck.Replace("DC 5", "DC 6", StringComparison.Ordinal);
                 AssertError(await mcp.Tool("kicad_simulation_start_typed", new { instanceId, input = changedDeck }), "simulation_operation_reused");
             }

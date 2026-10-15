@@ -275,8 +275,8 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
                 if (receipts.ReadTerminal(instanceId, expectedInstanceEpoch, jobId) is { } archive)
                 {
                     if (!archive.Operation.Document.Equals(target))
-                        throw new AutomationException("simulation_result_not_found",
-                            "No terminal simulation archive matches that original schematic document.");
+                        throw new AutomationException("simulation_wait_incomplete",
+                            "The terminal simulation archive belongs to another schematic document; no wait result is available for this target.");
                     return ArchivedData(archive, target);
                 }
             }

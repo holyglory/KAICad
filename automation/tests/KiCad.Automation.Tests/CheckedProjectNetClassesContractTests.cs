@@ -121,7 +121,7 @@ public sealed class CheckedProjectNetClassesContractTests
     }
 
     [TestMethod]
-    public void CompletedReceiptRequiresUnsavedUndoableBeforeAfterEvidence()
+    public void CompletedReceiptRequiresUndoableAndSaveReloadEvidence()
     {
         (CheckedProjectNetClassesTransaction request, NetClassesResponse before) = Request();
         var after = Classes("Default", "HighSpeed", "Differential");
@@ -140,11 +140,21 @@ public sealed class CheckedProjectNetClassesContractTests
             BeforeNetClassesSha256 = CheckedProjectNetClassesContract.NetClassesDigest(before),
             AfterNetClassesSha256 = CheckedProjectNetClassesContract.NetClassesDigest(after),
             ObservedBefore = request.ExpectedState.Clone(), ObservedAfter = afterState,
-            UndoRedoSupported = true
+            UndoRedoSupported = true, DesignFilesSaved = true, ReloadVerified = true
         };
         CheckedProjectNetClassesContract.ValidateResult(request, receipt, inspect: false);
 
         receipt.UndoRedoSupported = false;
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedProjectNetClassesContract.ValidateResult(request, receipt, inspect: false));
+
+        receipt.UndoRedoSupported = true;
+        receipt.DesignFilesSaved = false;
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedProjectNetClassesContract.ValidateResult(request, receipt, inspect: false));
+
+        receipt.DesignFilesSaved = true;
+        receipt.ReloadVerified = false;
         Assert.ThrowsExactly<AutomationException>(() =>
             CheckedProjectNetClassesContract.ValidateResult(request, receipt, inspect: false));
     }

@@ -843,7 +843,7 @@ API_HANDLER_COMMON::handleCheckedProjectNetClasses(
     response.set_post_commit_state( CPCPS_NOT_ATTEMPTED );
     response.set_error_code( "project_settings_checked_unavailable" );
     response.set_error_message(
-            "The native PCB project-settings owner has no editor-backed undo/redo path yet; no mutation was attempted" );
+            "The native PCB project-settings owner has no editor-backed undo/redo or save/reload path yet; no mutation was attempted" );
     response.set_undo_redo_supported( false );
 
     auto inserted = m_checkedProjectNetClassesReceipts.emplace( request.operation_id(), std::move( retained ) );

@@ -102,8 +102,9 @@ message CheckedProjectNetClassesReceipt
   CheckedProjectNetClassesPhase phase = 15;
   CheckedProjectNetClassesRollbackState rollback_state = 16;
   CheckedProjectNetClassesPostCommitState post_commit_state = 17;
-  // Project settings remain unsaved until the explicit document-save journey
-  // completes.  These flags never imply that save or reload was performed.
+  // A completed receipt must set both flags only after the explicit document-save
+  // and reload journey has been observed.  These flags are evidence, never a
+  // promise that a caller can infer from an in-memory mutation.
   bool design_files_saved = 18;
   bool reload_verified = 19;
   // Native project-settings ownership has not yet been implemented for peers

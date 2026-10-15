@@ -156,8 +156,8 @@ public static class CheckedProjectNetClassesContract
                     || result.BeforeNetClasses is null || result.AfterNetClasses is null
                     || result.ObservedBefore is null || result.ObservedAfter is null
                     || result.ObservedRollback is not null || !result.UndoRedoSupported
-                    || result.DesignFilesSaved || result.ReloadVerified)
-                    throw Invalid("A completed project netclass receipt must prove an unsaved undoable before/after result.");
+                    || !result.DesignFilesSaved || !result.ReloadVerified)
+                    throw Invalid("A completed project netclass receipt must prove undo/redo and explicit save/reload evidence.");
                 ValidateStateAfter(result.ObservedAfter, request.ExpectedState);
                 break;
             case CheckedProjectNetClassesState.CpcsRolledBack:

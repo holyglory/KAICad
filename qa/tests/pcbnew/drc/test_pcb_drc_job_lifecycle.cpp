@@ -3301,6 +3301,77 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     BOOST_CHECK_EQUAL( detachedRetry.error(), "manufacturing_dispatch_not_admitted" );
     BOOST_CHECK( !detachedRetried );
 
+    // Persisted stage manifests also cover the crash window after the atomic
+    // move and before the terminal journal write.  The barrier leaves the
+    // manager-owned stage and its durable manifest in place; the test moves
+    // that directory as a stand-in for a process exit, then a fresh manager
+    // must verify the exact moved output during prior-epoch reconciliation.
+    RunPcbManufacturingExport detachedCrashRequest = request;
+    detachedCrashRequest.set_operation_id( KIID().AsString().ToStdString() );
+    detachedCrashRequest.set_output_directory(
+            ( scratch.GetPath() / "detached-crash-output" ).string() );
+    auto detachedCrashAdmitted = manager.Start( detachedCrashRequest, epoch, capture, true );
+    BOOST_REQUIRE_MESSAGE( detachedCrashAdmitted.has_value(),
+                           ( detachedCrashAdmitted ? "" : detachedCrashAdmitted.error() ) );
+    std::string detachedCrashStaging;
+    auto detachedCrashWorker = manager.Dispatch( detachedCrashRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& context )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                detachedCrashStaging = context.stagingDirectory;
+                std::ofstream staged( std::filesystem::path( context.stagingDirectory ) / "export.svg",
+                                      std::ios::binary );
+                staged << "detached output across crash window\n";
+                if( !staged ) return tl::unexpected( "detached_staging_write_failed" );
+                PcbManufacturingExportReceipt completed;
+                completed.set_status( PCB_MFG_EXPORT_COMPLETED );
+                return completed;
+            }, {}, true );
+    BOOST_REQUIRE_MESSAGE( detachedCrashWorker.has_value(),
+                           ( detachedCrashWorker ? "" : detachedCrashWorker.error() ) );
+    wxSetEnv( wxT( "KICAD_MANUFACTURING_TEST_BARRIER" ),
+              wxT( "before-publication-rename" ) );
+    auto pausedPublication = manager.PublishDetached(
+            detachedCrashRequest.operation_id(), epoch, capture );
+    wxUnsetEnv( wxT( "KICAD_MANUFACTURING_TEST_BARRIER" ) );
+    BOOST_REQUIRE( !pausedPublication.has_value() );
+    BOOST_CHECK_EQUAL( pausedPublication.error(),
+                       "manufacturing_test_before_publication_rename" );
+    NATIVE_STATE_DIGEST detachedCrashDigest;
+    detachedCrashDigest.Append( detachedCrashRequest.SerializeAsString() );
+    ReadPcbManufacturingExportJob detachedCrashRead = read;
+    detachedCrashRead.set_operation_id( detachedCrashRequest.operation_id() );
+    detachedCrashRead.set_request_fingerprint_sha256( detachedCrashDigest.Hex() );
+    auto stagedCrash = manager.Read( detachedCrashRead, epoch );
+    BOOST_REQUIRE_MESSAGE( stagedCrash.has_value(), ( stagedCrash ? "" : stagedCrash.error() ) );
+    BOOST_CHECK( stagedCrash->receipt().output_manifest_complete() );
+    BOOST_CHECK_EQUAL( stagedCrash->receipt().artifacts_size(), 1 );
+    BOOST_REQUIRE( !detachedCrashStaging.empty() );
+    std::error_code crashMoveError;
+    std::filesystem::rename( detachedCrashStaging, detachedCrashRequest.output_directory(),
+                              crashMoveError );
+    BOOST_REQUIRE_MESSAGE( !crashMoveError, crashMoveError.message() );
+
+    const std::string detachedCrashRestartEpoch = KIID().AsString().ToStdString();
+    PCB_MANUFACTURING_JOB_MANAGER detachedCrashRestarted( journalDirectory );
+    ReconcilePcbManufacturingExport detachedCrashReconcile;
+    detachedCrashReconcile.mutable_document()->CopyFrom( document );
+    detachedCrashReconcile.set_operation_id( detachedCrashRequest.operation_id() );
+    detachedCrashReconcile.set_process_epoch( detachedCrashRestartEpoch );
+    detachedCrashReconcile.set_prior_process_epoch( epoch );
+    detachedCrashReconcile.set_allow_prior_process_epoch( true );
+    detachedCrashReconcile.set_request_fingerprint_sha256( detachedCrashDigest.Hex() );
+    auto detachedCrashRecovered = detachedCrashRestarted.Reconcile(
+            detachedCrashReconcile, detachedCrashRestartEpoch );
+    BOOST_REQUIRE_MESSAGE( detachedCrashRecovered.has_value(),
+                           ( detachedCrashRecovered ? "" : detachedCrashRecovered.error() ) );
+    BOOST_CHECK( detachedCrashRecovered->restart_reconciled() );
+    BOOST_CHECK_EQUAL( detachedCrashRecovered->receipt().status(), PCB_MFG_EXPORT_COMPLETED );
+    BOOST_CHECK_EQUAL( detachedCrashRecovered->receipt().publication_state(),
+                       PCB_MFG_PUBLICATION_PUBLISHED );
+    BOOST_CHECK( detachedCrashRecovered->published_outputs_verified() );
+    BOOST_CHECK( std::filesystem::exists( detachedCrashRequest.output_directory() ) );
+
     // A completed detached worker remains staged until the registering owner
     // thread rechecks the exact lifecycle/dependency snapshot and asks the
     // manager to publish its operation-owned directory atomically.

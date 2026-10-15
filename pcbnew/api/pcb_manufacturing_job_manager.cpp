@@ -389,6 +389,12 @@ bool AtomicPublishNoReplaceDirectory( const fs::path& aStaging, const fs::path& 
     return false;
 #endif
 }
+
+bool TestPublicationBarrier()
+{
+    const char* value = std::getenv( "KICAD_MANUFACTURING_TEST_BARRIER" );
+    return value && std::string( value ) == "before-publication-rename";
+}
 }
 
 PCB_MANUFACTURING_JOB_MANAGER::PCB_MANUFACTURING_JOB_MANAGER( const wxString& aDirectory ) :
@@ -1644,10 +1650,31 @@ PCB_MANUFACTURING_JOB_MANAGER::PublishDetached( const std::string& aOperationId,
                                "The detached publication target already exists." );
 
     JournalRecord candidate = *current;
-    Receipt& published = *candidate.mutable_receipt();
-    if( auto inventory = InventoryDetachedStaging( staging, published ); !inventory )
+    Receipt* published = candidate.mutable_receipt();
+    if( auto inventory = InventoryDetachedStaging( staging, *published ); !inventory )
         return persistFailure( std::move( candidate ), "manufacturing_staging_manifest_invalid",
                                inventory.error() );
+
+    // Persist the exact stage manifest before the no-replace move.  If the
+    // owner process exits after the move but before the terminal journal write,
+    // a replacement process can still verify the moved output from this
+    // durable record.  The receipt remains STAGED until the move and the
+    // post-move verification both succeed.
+    if( candidate.journal_revision() == std::numeric_limits<uint64_t>::max() )
+        return tl::unexpected( "invalid_manufacturing_journal" );
+    candidate.set_journal_revision( candidate.journal_revision() + 1 );
+    if( auto persisted = write( candidate ); !persisted )
+        return tl::unexpected( persisted.error() );
+    // write() swaps the record with its verified on-disk parse. Reacquire the
+    // receipt before touching it after that call; references into the prior
+    // protobuf storage are no longer valid.
+    published = candidate.mutable_receipt();
+
+    // Deterministic test seam for the crash window above.  Production callers
+    // never set this environment variable; the journal intentionally remains
+    // recoverable and the staging directory remains in place.
+    if( TestPublicationBarrier() )
+        return tl::unexpected( "manufacturing_test_before_publication_rename" );
 
     std::string publicationReason;
     if( !AtomicPublishNoReplaceDirectory( staging, output, publicationReason ) )
@@ -1657,28 +1684,28 @@ PCB_MANUFACTURING_JOB_MANAGER::PublishDetached( const std::string& aOperationId,
     // The rename is atomic and non-interruptible.  Do not journal PUBLISHED
     // until the output directory, exact file set, byte sizes, hashes and
     // manifest digest have all been re-read from the published path.
-    for( int index = 0; index < published.artifacts_size(); ++index )
+    for( int index = 0; index < published->artifacts_size(); ++index )
     {
-        PcbManufacturingArtifact* artifact = published.mutable_artifacts( index );
+        PcbManufacturingArtifact* artifact = published->mutable_artifacts( index );
         artifact->set_path( ( output / fs::u8path( artifact->relative_path() ) ).generic_string() );
     }
-    published.set_status( PCB_MFG_EXPORT_COMPLETED );
-    published.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
-    published.set_terminal( true );
-    published.set_worker_finished( true );
-    published.set_publication_state( PCB_MFG_PUBLICATION_PUBLISHED );
-    published.set_publication_committed( true );
-    published.set_recovery_state( PCB_MFG_RECOVERY_RECONCILED );
-    published.clear_error_code();
-    published.clear_error_message();
+    published->set_status( PCB_MFG_EXPORT_COMPLETED );
+    published->set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+    published->set_terminal( true );
+    published->set_worker_finished( true );
+    published->set_publication_state( PCB_MFG_PUBLICATION_PUBLISHED );
+    published->set_publication_committed( true );
+    published->set_recovery_state( PCB_MFG_RECOVERY_RECONCILED );
+    published->clear_error_code();
+    published->clear_error_message();
     // Keep the journal's immutable admission epoch in observed_after so the
     // existing receipt contract remains self-consistent.  The owner recheck
     // above still proves the current epoch and compares every source field
     // other than that process identity.
-    published.mutable_observed_after()->CopyFrom(
+    published->mutable_observed_after()->CopyFrom(
             staged.process_epoch() == aProcessEpoch ? recaptured->after : staged.observed_before() );
 
-    if( auto verified = VerifyPublishedOutputs( published ); !verified )
+    if( auto verified = VerifyPublishedOutputs( *published ); !verified )
     {
         return persistFailure( std::move( candidate ), "manufacturing_published_outputs_unverified",
                                verified.error() );
@@ -1897,6 +1924,86 @@ PCB_MANUFACTURING_JOB_MANAGER::Reconcile( const ReconcilePcbManufacturingExport&
         if( auto persisted = write( *current ); !persisted ) return tl::unexpected( persisted.error() );
         journal = std::move( current );
         response.set_restart_reconciled( true );
+    }
+
+    // The owner may have completed the atomic stage-to-output move and then
+    // exited before recording the terminal receipt.  The pre-move journal
+    // write above leaves an exact manifest for this recovery path.  Claim the
+    // output only when the moved directory is the canonical target and every
+    // recorded artifact verifies; otherwise retain the staged evidence and
+    // fail closed below.
+    if( journal->receipt().recovery_state() == PCB_MFG_RECOVERY_RECOVERABLE_STAGED
+        && journal->receipt().publication_state() == PCB_MFG_PUBLICATION_STAGED
+        && !OwnedDetachedStagingExists( journal->request(), journal->receipt().staging_directory() )
+        && journal->receipt().output_manifest_complete()
+        && journal->receipt().artifacts_size() > 0 )
+    {
+        const Request& request = journal->request();
+        const Receipt& staged = journal->receipt();
+        const fs::path output = fs::u8path( request.output_directory() );
+        const fs::path expectedStaging = output.parent_path()
+                / ( output.filename().string() + ".kicad-staging-" + request.operation_id() );
+        const fs::path recordedStaging = fs::u8path( staged.staging_directory() );
+        const bool canonicalPaths = !output.empty() && output.is_absolute()
+                && output == output.lexically_normal() && !output.parent_path().empty()
+                && recordedStaging == expectedStaging && recordedStaging.is_absolute()
+                && recordedStaging == recordedStaging.lexically_normal();
+        std::error_code outputError;
+        const fs::file_status outputStatus = fs::symlink_status( output, outputError );
+        const bool movedOutput = canonicalPaths && !outputError
+                && outputStatus.type() == fs::file_type::directory;
+
+        if( movedOutput )
+        {
+            bool manifestPathsMatch = true;
+            for( const PcbManufacturingArtifact& artifact : staged.artifacts() )
+            {
+                const fs::path relative = fs::u8path( artifact.relative_path() );
+                const std::string relativeText = relative.generic_string();
+                const fs::path expectedPath = ( recordedStaging / relative ).lexically_normal();
+                if( artifact.relative_path().empty() || relative.is_absolute()
+                    || relative != relative.lexically_normal() || relativeText == "."
+                    || relativeText == ".."
+                    || ( relativeText.size() >= 3 && relativeText.compare( 0, 3, "../" ) == 0 )
+                    || fs::u8path( artifact.path() ) != expectedPath )
+                {
+                    manifestPathsMatch = false;
+                    break;
+                }
+            }
+
+            if( !manifestPathsMatch )
+                return tl::unexpected( "manufacturing_published_outputs_unverified" );
+            if( auto links = NoLinks( output ); !links )
+                return tl::unexpected( "manufacturing_published_outputs_unverified" );
+
+            JournalRecord candidate = *journal;
+            Receipt& published = *candidate.mutable_receipt();
+    for( int index = 0; index < published.artifacts_size(); ++index )
+    {
+        PcbManufacturingArtifact* artifact = published.mutable_artifacts( index );
+        artifact->set_path( ( output / fs::u8path( artifact->relative_path() ) ).generic_string() );
+    }
+    published.set_status( PCB_MFG_EXPORT_COMPLETED );
+    published.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+    published.set_terminal( true );
+    published.set_worker_finished( true );
+    published.set_publication_state( PCB_MFG_PUBLICATION_PUBLISHED );
+    published.set_publication_committed( true );
+    published.set_recovery_state( PCB_MFG_RECOVERY_RECONCILED );
+    published.clear_error_code();
+    published.clear_error_message();
+    published.mutable_observed_after()->CopyFrom( staged.observed_before() );
+    if( auto verified = VerifyPublishedOutputs( published ); !verified )
+                return tl::unexpected( verified.error() );
+            if( candidate.journal_revision() == std::numeric_limits<uint64_t>::max() )
+                return tl::unexpected( "invalid_manufacturing_journal" );
+            candidate.set_journal_revision( candidate.journal_revision() + 1 );
+            if( auto persisted = write( candidate ); !persisted )
+                return tl::unexpected( persisted.error() );
+            journal = std::move( candidate );
+            response.set_restart_reconciled( true );
+        }
     }
 
     response.set_found( true );

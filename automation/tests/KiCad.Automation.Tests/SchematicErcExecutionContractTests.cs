@@ -1,6 +1,7 @@
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -140,6 +141,40 @@ public sealed class SchematicErcExecutionContractTests
 
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
             tool.Execute("unused", null!, cancellation.Token));
+    }
+
+    [TestMethod]
+    public void DeliveredCancellationRequiresNativeReceiptRecoveryBeforeRetry()
+    {
+        var fixture = Fixture();
+        var error = SchematicErcExecutionContract.TransportFailure(fixture.OperationId,
+            new NngOperationCanceledException(8, "reply cancelled", requestDelivered: true,
+                responseReceived: false));
+
+        Assert.AreEqual("operation_outcome_unknown", error.Code);
+        StringAssert.Contains(error.Message, fixture.OperationId);
+        StringAssert.Contains(error.Message, "may have completed late");
+        StringAssert.Contains(error.Message, "kicad_schematic_erc_operation");
+        StringAssert.Contains(error.Message, "never submit a second ERC run");
+    }
+
+    [TestMethod]
+    public void DeliveredDisconnectAndUnsentCancellationHaveDifferentRetrySafety()
+    {
+        var fixture = Fixture();
+        var disconnected = SchematicErcExecutionContract.TransportFailure(fixture.OperationId,
+            new NngException(5, "reply timeout", requestDelivered: true));
+        Assert.AreEqual("operation_outcome_unknown", disconnected.Code);
+        StringAssert.Contains(disconnected.Message, "reply was lost");
+        StringAssert.Contains(disconnected.Message, "kicad_schematic_erc_operation");
+
+        var unsent = SchematicErcExecutionContract.TransportFailure(fixture.OperationId,
+            new NngOperationCanceledException(4, "cancelled before send", requestDelivered: false,
+                responseReceived: false));
+        Assert.AreEqual("native_not_reached", unsent.Code);
+        StringAssert.Contains(unsent.Message, "No native ERC execution was admitted");
+        StringAssert.Contains(unsent.Message, "fresh lifecycle state");
+        Assert.DoesNotContain("kicad_schematic_erc_operation", unsent.Message);
     }
 
     [TestMethod]

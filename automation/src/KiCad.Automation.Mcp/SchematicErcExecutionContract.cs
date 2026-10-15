@@ -1,5 +1,6 @@
 using Kiapi.Common.Types;
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Mcp;
@@ -222,6 +223,41 @@ internal static class SchematicErcExecutionContract
             default:
                 throw Invalid("The native schematic ERC receipt has an unknown lifecycle state.");
         }
+    }
+
+    /// <summary>
+    /// Converts a transport loss while an ERC request is in flight into an
+    /// explicit recovery instruction. Once NNG has delivered the request, the
+    /// native process may finish and retain a receipt after the MCP reply is
+    /// cancelled or disconnected; callers must inspect that receipt before
+    /// considering another execution.
+    /// </summary>
+    public static AutomationException TransportFailure(string operationId, NngOperationCanceledException error)
+    {
+        return TransportFailure(operationId, error.RequestDelivered || error.ResponseReceived,
+            error.RequestDelivered ? "cancellation stopped the native reply" : "cancellation stopped before native dispatch");
+    }
+
+    /// <summary>Classifies a lost NNG reply without guessing whether native ERC ran.</summary>
+    public static AutomationException TransportFailure(string operationId, NngException error)
+    {
+        return TransportFailure(operationId, error.RequestDelivered,
+            error.RequestDelivered ? "the native reply was lost" : "the native peer did not receive the request");
+    }
+
+    private static AutomationException TransportFailure(string operationId, bool requestDelivered, string detail)
+    {
+        CanonicalUuid(operationId, "operation ID");
+        if (requestDelivered)
+        {
+            return new AutomationException("operation_outcome_unknown",
+                $"The native ERC operation {operationId} was received, but {detail}. Native ERC may have completed late; "
+                + "read kicad_schematic_erc_operation with the same operation ID before retrying, and never submit a second ERC run while its outcome is unknown.");
+        }
+
+        return new AutomationException("native_not_reached",
+            $"The native peer did not receive ERC operation {operationId}; {detail}. No native ERC execution was admitted, "
+            + "so obtain a fresh lifecycle state before retrying.");
     }
 
     private static void ValidateLifecycleState(DocumentLifecycleState state,

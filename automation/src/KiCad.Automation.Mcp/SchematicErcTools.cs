@@ -97,6 +97,14 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
             SchematicErcExecutionContract.RequireSuccessful(result);
             return DescribeRun(instanceId, session.Epoch, request.Document, result);
         }
+        catch (NngOperationCanceledException error)
+        {
+            throw SchematicErcExecutionContract.TransportFailure(request.OperationId, error);
+        }
+        catch (NngException error)
+        {
+            throw SchematicErcExecutionContract.TransportFailure(request.OperationId, error);
+        }
         catch (NativeApiException error) when (error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnhandled
             || error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnimplemented)
         {
@@ -158,6 +166,14 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
             result = await client.InvokeAsync<NativeCapabilitySchematicExecuteErc,
             NativeErcOperationReceipt>(request, cancellationToken);
         }
+        catch (NngOperationCanceledException error)
+        {
+            throw SchematicErcExecutionContract.TransportFailure(request.OperationId, error);
+        }
+        catch (NngException error)
+        {
+            throw SchematicErcExecutionContract.TransportFailure(request.OperationId, error);
+        }
         catch (NativeApiException error) when (error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnhandled
             || error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnimplemented)
         {
@@ -186,8 +202,20 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
         if (session.Epoch != expectedProcessEpoch)
             throw new AutomationException("stale_process_epoch", "The ERC operation belongs to another native process epoch.");
-        NativeCapabilitySchematicReadErcOperationResponse? recovery = await ReadNativeRecovery(
-            client, target, expectedProcessEpoch, operationId, cancellationToken, tolerateUnsupported: false);
+        NativeCapabilitySchematicReadErcOperationResponse? recovery;
+        try
+        {
+            recovery = await ReadNativeRecovery(
+                client, target, expectedProcessEpoch, operationId, cancellationToken, tolerateUnsupported: false);
+        }
+        catch (NngOperationCanceledException error)
+        {
+            throw SchematicErcExecutionContract.TransportFailure(operationId, error);
+        }
+        catch (NngException error)
+        {
+            throw SchematicErcExecutionContract.TransportFailure(operationId, error);
+        }
         if (recovery is null)
             throw new AutomationException("native_erc_receipt_unavailable", "The connected KiCad peer did not return an ERC recovery response.");
         SchematicErcExecutionContract.ValidateRecoveryResponse(recovery, target, operationId, expectedProcessEpoch);

@@ -102,7 +102,15 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
         using var ownership = receipts.AcquireSession(instanceId);
-        var result = await ReadNative(client, instanceId, session.Epoch, target, jobId.ToString("D"), cancellationToken);
+        SimulationJobState result;
+        try
+        {
+            result = await ReadNative(client, instanceId, session.Epoch, target, jobId.ToString("D"), cancellationToken);
+        }
+        catch (AutomationException error) when (error.Code == "simulation_result_not_found")
+        {
+            throw new AutomationException("simulation_unavailable", error.Message);
+        }
         var operation = receipts.ReadOperation(instanceId, Guid.Parse(result.OperationId));
         return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(operation), job = Describe(result) });
     });

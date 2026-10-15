@@ -2893,6 +2893,13 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     const std::string epoch = KIID().AsString().ToStdString();
     const std::string operation = KIID().AsString().ToStdString();
     const auto boardPath = scratch.GetPath() / "fixture.kicad_pcb";
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    const std::string source = "(kicad_pcb (version 20260101) (generator pcbnew)\n)\n";
+    const std::string projectSource = "{\"board\":{}}\n";
+    {
+        std::ofstream board( boardPath ); board << source;
+        std::ofstream project( projectPath ); project << projectSource;
+    }
     kiapi::common::types::DocumentSpecifier document;
     document.set_type( kiapi::common::types::DOCTYPE_PCB );
     document.mutable_project()->set_name( "fixture" );
@@ -2908,14 +2915,20 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     state.set_state_sha256( std::string( 64, 'a' ) );
     state.set_project_settings_included( true );
     state.set_disk_baseline_checked( true );
-    state.add_native_files( boardPath.string() );
-    auto* sourceBaseline = state.add_file_baselines();
-    sourceBaseline->set_path( boardPath.string() );
-    sourceBaseline->set_baseline_known( true );
-    sourceBaseline->set_current_known( true );
-    sourceBaseline->set_baseline_exists( false );
-    sourceBaseline->set_current_exists( false );
-    sourceBaseline->set_status( NFBS_UNCHANGED );
+    auto addBaseline = [&]( const std::filesystem::path& path, const std::string& bytes )
+    {
+        NATIVE_STATE_DIGEST digest; digest.Append( bytes );
+        state.add_native_files( path.string() );
+        auto* baseline = state.add_file_baselines();
+        baseline->set_path( path.string() );
+        baseline->set_baseline_known( true ); baseline->set_current_known( true );
+        baseline->set_baseline_exists( true ); baseline->set_current_exists( true );
+        baseline->set_baseline_sha256( digest.Hex() ); baseline->set_current_sha256( digest.Hex() );
+        baseline->set_baseline_bytes( bytes.size() ); baseline->set_current_bytes( bytes.size() );
+        baseline->set_status( NFBS_UNCHANGED );
+    };
+    addBaseline( boardPath, source );
+    addBaseline( projectPath, projectSource );
     RunPcbManufacturingExport request;
     request.set_operation_id( operation );
     request.set_process_epoch( epoch );
@@ -2923,12 +2936,22 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     request.mutable_expected_state()->CopyFrom( state );
     request.set_output_directory( ( scratch.GetPath() / "output" ).string() );
     request.mutable_export_svg()->mutable_job_settings()->mutable_document()->CopyFrom( document );
-    const std::string source = "(kicad_pcb (version 20260101) (generator pcbnew)\n)\n";
     auto capture = [&]( const DocumentSpecifier& target ) -> tl::expected<PCB_MANUFACTURING_JOB_MANAGER::CAPTURE, std::string>
     {
         if( !MessageDifferencer::Equals( target, document ) )
             return tl::unexpected( "capture target mismatch" );
-        return PCB_MANUFACTURING_JOB_MANAGER::CAPTURE{ state, state, source };
+        PcbManufacturingDetachedSnapshot snapshot;
+        snapshot.set_serialized_board( source ); snapshot.set_serialized_project( projectSource );
+        snapshot.set_board_serialization_complete( true ); snapshot.set_project_serialization_complete( true );
+        snapshot.set_dependency_capture_complete( true ); snapshot.set_disk_baseline_checked( true );
+        for( const auto& baseline : state.file_baselines() )
+        {
+            auto* dependency = snapshot.add_dependency_baselines();
+            dependency->set_path( baseline.path() ); dependency->set_sha256( baseline.baseline_sha256() );
+            dependency->set_bytes( baseline.baseline_bytes() ); dependency->set_exists( baseline.baseline_exists() );
+            dependency->set_known( baseline.baseline_known() );
+        }
+        return PCB_MANUFACTURING_JOB_MANAGER::CAPTURE{ state, state, source, snapshot };
     };
 
     wxUnsetEnv( wxT( "KICAD_MANUFACTURING_TEST_BARRIER" ) );

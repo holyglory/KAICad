@@ -69,7 +69,9 @@ public:
         kiapi::automation::v1::PcbManufacturingDetachedSnapshot sourceSnapshot;
         // Detached adapters may write only below this operation-owned path.
         // The manager creates it before dispatch intent is published; the
-        // owner thread remains responsible for any later publication.
+        // owner thread remains responsible for any later publication. An
+        // uncertain detached result may retain this exact path for explicit
+        // recovery, but that retention never claims publication.
         std::string stagingDirectory;
         // Copied before worker creation.  This is the immutable lifecycle and
         // dependency baseline associated with sourceBoard; a worker never

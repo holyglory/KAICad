@@ -251,6 +251,29 @@ tl::expected<fs::path, std::string> PrepareDetachedStaging(
     if( auto links = NoLinks( staging ); !links ) return tl::unexpected( links.error() );
     return staging;
 }
+
+// Keep an uncertain detached result inspectable without treating it as
+// published. The path must still be the manager-derived sibling for this
+// operation and remain a regular, link-free directory; arbitrary adapter
+// paths are never retained as recovery authority.
+bool OwnedDetachedStagingExists(
+        const kiapi::automation::v1::RunPcbManufacturingExport& aRequest,
+        const std::string& aStagingDirectory )
+{
+    if( aStagingDirectory.empty() ) return false;
+
+    const fs::path output = fs::u8path( aRequest.output_directory() );
+    const fs::path expected = output.parent_path()
+            / ( output.filename().string() + ".kicad-staging-" + aRequest.operation_id() );
+    const fs::path staging = fs::u8path( aStagingDirectory );
+    if( staging != expected || !staging.is_absolute() || staging != staging.lexically_normal() )
+        return false;
+    if( auto links = NoLinks( staging ); !links ) return false;
+
+    std::error_code error;
+    const fs::file_status status = fs::symlink_status( staging, error );
+    return !error && status.type() == fs::file_type::directory;
+}
 }
 
 PCB_MANUFACTURING_JOB_MANAGER::PCB_MANUFACTURING_JOB_MANAGER( const wxString& aDirectory ) :
@@ -1049,8 +1072,15 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
         const std::string stagingDirectory = current->receipt().staging_directory();
         JournalRecord candidate = *current;
         SetDispatchIndeterminate( *candidate.mutable_receipt(), aCode, aMessage );
-        if( aDetachedWorker && !stagingDirectory.empty() )
+        if( aDetachedWorker && OwnedDetachedStagingExists( aRequest, stagingDirectory ) )
+        {
+            // Preserve only the manager-owned stage. It is useful for an
+            // explicit later recovery decision, but it is never treated as
+            // a published output after an uncertain worker result.
             candidate.mutable_receipt()->set_staging_directory( stagingDirectory );
+            candidate.mutable_receipt()->set_publication_state( PCB_MFG_PUBLICATION_STAGED );
+            candidate.mutable_receipt()->set_recovery_state( PCB_MFG_RECOVERY_RECOVERABLE_STAGED );
+        }
         if( aCode.rfind( "export_cancelled", 0 ) == 0 )
         {
             candidate.mutable_receipt()->set_cancellation_requested( true );
@@ -1111,7 +1141,7 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
     {
         lock.unlock();
         return persistIndeterminate( "manufacturing_detached_publication_unavailable",
-                                     "The detached SVG worker has no manager-owned publication boundary; output was not claimed as published." );
+                                     "The detached SVG worker produced a terminal result, but manager-owned publication is unavailable; its owned staging directory was retained and output was not claimed as published." );
     }
 
     JournalRecord candidate = *current;
@@ -1159,8 +1189,6 @@ PCB_MANUFACTURING_JOB_MANAGER::DispatchAsync( const Request& aRequest,
 {
     if( !aAdapter ) return tl::unexpected( "manufacturing_dispatch_adapter_unavailable" );
 
-    auto worker = std::make_shared<WORKER>();
-    worker->cancellation = std::make_shared<CANCELLATION_TOKEN>();
     Receipt admitted;
 
     // Admission of the worker is itself journaled before the thread is made
@@ -1182,6 +1210,16 @@ PCB_MANUFACTURING_JOB_MANAGER::DispatchAsync( const Request& aRequest,
         return tl::unexpected( "manufacturing_dependency_snapshot_incomplete" );
     if( m_workers.find( aRequest.operation_id() ) != m_workers.end() )
         return tl::unexpected( "manufacturing_worker_already_started" );
+
+    // Keep unsupported detached families out of the worker admission/journal
+    // boundary. The worker seam currently has one SVG-only adapter, so a
+    // different job must fail before a worker is started or a cancellation
+    // lease is exposed to callers.
+    if( aRequest.job_case() != Request::kExportSvg )
+        return tl::unexpected( "manufacturing_svg_detached_adapter_only" );
+
+    auto worker = std::make_shared<WORKER>();
+    worker->cancellation = std::make_shared<CANCELLATION_TOKEN>();
 
     auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ),
                                        aRequest.operation_id() );
@@ -1297,7 +1335,16 @@ PCB_MANUFACTURING_JOB_MANAGER::FinalizeWorkerIndeterminate(
     if( receipt.status() == PCB_MFG_EXPORT_RUNNING
         && receipt.dispatch_stage() == PCB_MFG_DISPATCH_SUBMITTED )
     {
+        const std::string stagingDirectory = receipt.staging_directory();
+        const bool preserveStaging =
+                OwnedDetachedStagingExists( journal->request(), stagingDirectory );
         SetDispatchIndeterminate( receipt, aErrorCode, aErrorMessage );
+        if( preserveStaging )
+        {
+            receipt.set_staging_directory( stagingDirectory );
+            receipt.set_publication_state( PCB_MFG_PUBLICATION_STAGED );
+            receipt.set_recovery_state( PCB_MFG_RECOVERY_RECOVERABLE_STAGED );
+        }
         receipt.set_worker_started( true );
         receipt.set_snapshot_complete( HasCompleteSourceSnapshot( receipt.observed_before() ) );
     }

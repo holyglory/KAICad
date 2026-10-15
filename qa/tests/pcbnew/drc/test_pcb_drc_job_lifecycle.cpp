@@ -3193,6 +3193,94 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     BOOST_CHECK( runningRead->receipt().native_dispatch() );
     BOOST_CHECK( runningRead->journal_verified() );
 
+    // Detached workers retain only their manager-owned staging boundary when
+    // publication is unavailable. The output directory remains absent and a
+    // later read can inspect the staged evidence without treating it as a
+    // completed publication or rerunning the exact operation.
+    RunPcbManufacturingExport detachedFailureRequest = request;
+    detachedFailureRequest.set_operation_id( KIID().AsString().ToStdString() );
+    detachedFailureRequest.set_output_directory(
+            ( scratch.GetPath() / "detached-failure-output" ).string() );
+    auto detachedFailureAdmitted = manager.Start( detachedFailureRequest, epoch, capture, true );
+    BOOST_REQUIRE_MESSAGE( detachedFailureAdmitted.has_value(),
+                           ( detachedFailureAdmitted ? "" : detachedFailureAdmitted.error() ) );
+    std::string detachedStagingPath;
+    auto detachedFailure = manager.Dispatch( detachedFailureRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& context )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                if( !context.detachedWorker || context.stagingDirectory.empty() )
+                    return tl::unexpected( "detached_context_missing_staging" );
+                detachedStagingPath = context.stagingDirectory;
+                std::ofstream staged( std::filesystem::path( context.stagingDirectory ) / "export.svg",
+                                      std::ios::binary );
+                staged << "detached output retained for recovery\n";
+                if( !staged ) return tl::unexpected( "detached_staging_write_failed" );
+                return tl::unexpected( "detached_adapter_lost_reply" );
+            }, {}, true );
+    BOOST_REQUIRE_MESSAGE( detachedFailure.has_value(),
+                           ( detachedFailure ? "" : detachedFailure.error() ) );
+    BOOST_CHECK_EQUAL( detachedFailure->status(), PCB_MFG_EXPORT_INDETERMINATE );
+    BOOST_CHECK_EQUAL( detachedFailure->recovery_state(), PCB_MFG_RECOVERY_RECOVERABLE_STAGED );
+    BOOST_CHECK_EQUAL( detachedFailure->publication_state(), PCB_MFG_PUBLICATION_STAGED );
+    BOOST_CHECK( !detachedFailure->publication_committed() );
+    BOOST_REQUIRE( !detachedStagingPath.empty() );
+    BOOST_CHECK_EQUAL( detachedFailure->staging_directory(), detachedStagingPath );
+    BOOST_CHECK( !std::filesystem::exists( detachedFailureRequest.output_directory() ) );
+    BOOST_CHECK( std::filesystem::exists( std::filesystem::path( detachedStagingPath ) / "export.svg" ) );
+
+    NATIVE_STATE_DIGEST detachedDigest;
+    detachedDigest.Append( detachedFailureRequest.SerializeAsString() );
+    ReadPcbManufacturingExportJob detachedReadRequest = read;
+    detachedReadRequest.set_operation_id( detachedFailureRequest.operation_id() );
+    detachedReadRequest.set_request_fingerprint_sha256( detachedDigest.Hex() );
+    auto detachedRead = manager.Read( detachedReadRequest, epoch );
+    BOOST_REQUIRE_MESSAGE( detachedRead.has_value(), ( detachedRead ? "" : detachedRead.error() ) );
+    BOOST_CHECK_EQUAL( detachedRead->receipt().staging_directory(), detachedStagingPath );
+    BOOST_CHECK( !detachedRead->published_outputs_verified() );
+
+    bool detachedRetried = false;
+    auto detachedRetry = manager.Dispatch( detachedFailureRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                detachedRetried = true;
+                return tl::unexpected( "detached_retry_must_not_run" );
+            }, {}, true );
+    BOOST_CHECK( !detachedRetry.has_value() );
+    BOOST_CHECK_EQUAL( detachedRetry.error(), "manufacturing_dispatch_not_admitted" );
+    BOOST_CHECK( !detachedRetried );
+
+    // Unsupported detached families fail before worker/journal admission.
+    RunPcbManufacturingExport unsupportedDetached = request;
+    unsupportedDetached.set_operation_id( KIID().AsString().ToStdString() );
+    unsupportedDetached.set_output_directory( ( scratch.GetPath() / "unsupported-detached-output" ).string() );
+    unsupportedDetached.mutable_export_stats();
+    auto unsupportedAdmitted = manager.Start( unsupportedDetached, epoch, capture, true );
+    BOOST_REQUIRE_MESSAGE( unsupportedAdmitted.has_value(),
+                           ( unsupportedAdmitted ? "" : unsupportedAdmitted.error() ) );
+    bool unsupportedWorkerCalled = false;
+    auto unsupportedDispatch = manager.DispatchAsync( unsupportedDetached, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                unsupportedWorkerCalled = true;
+                return tl::unexpected( "unsupported_worker_must_not_run" );
+            } );
+    BOOST_CHECK( !unsupportedDispatch.has_value() );
+    BOOST_CHECK_EQUAL( unsupportedDispatch.error(), "manufacturing_svg_detached_adapter_only" );
+    BOOST_CHECK( !unsupportedWorkerCalled );
+    NATIVE_STATE_DIGEST unsupportedDigest;
+    unsupportedDigest.Append( unsupportedDetached.SerializeAsString() );
+    ReadPcbManufacturingExportJob unsupportedReadRequest = read;
+    unsupportedReadRequest.set_operation_id( unsupportedDetached.operation_id() );
+    unsupportedReadRequest.set_request_fingerprint_sha256( unsupportedDigest.Hex() );
+    auto unsupportedRead = manager.Read( unsupportedReadRequest, epoch );
+    BOOST_REQUIRE_MESSAGE( unsupportedRead.has_value(),
+                           ( unsupportedRead ? "" : unsupportedRead.error() ) );
+    BOOST_CHECK_EQUAL( unsupportedRead->receipt().status(), PCB_MFG_EXPORT_ADMITTED );
+    BOOST_CHECK( !unsupportedRead->receipt().worker_started() );
+
     // A manager-owned worker receives only the captured source/dependency
     // snapshot and a cooperative cancellation token.  Cancellation after the
     // submitted transition is terminally indeterminate, then Join records

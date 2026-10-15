@@ -8,9 +8,36 @@ namespace KiCad.Automation.Model;
 
 public sealed record PcbSvgGuideSegment(decimal StartX, decimal StartY, decimal EndX, decimal EndY);
 
+public enum PcbSvgGuidePaint
+{
+    Unspecified = 0,
+    None = 1,
+    Paint = 2,
+    Unsupported = 3
+}
+
+/// <summary>
+/// The source element that produced one contiguous range of guide segments.
+/// Paint values are intentionally conservative: an omitted presentation value
+/// remains <see cref="PcbSvgGuidePaint.Unspecified"/> because the conversion
+/// boundary emits outline strokes and cannot silently preserve SVG fills or
+/// inherited CSS.
+/// </summary>
+public sealed record PcbSvgGuideShape(
+    string ElementName,
+    int SegmentStart,
+    int SegmentCount,
+    bool Closed,
+    PcbSvgGuidePaint Fill,
+    PcbSvgGuidePaint Stroke,
+    bool StrokeWidthSpecified,
+    bool UnsupportedStyle);
+
 public sealed record PcbSvgGuide(decimal ViewBoxX, decimal ViewBoxY, decimal ViewBoxWidth, decimal ViewBoxHeight,
     ImmutableArray<PcbSvgGuideSegment> Segments)
 {
+    public ImmutableArray<PcbSvgGuideShape> Shapes { get; init; } = ImmutableArray<PcbSvgGuideShape>.Empty;
+
     public void Validate()
     {
         if (ViewBoxWidth <= 0 || ViewBoxHeight <= 0 || Segments.IsDefault || Segments.IsEmpty)
@@ -24,6 +51,14 @@ public sealed record PcbSvgGuide(decimal ViewBoxX, decimal ViewBoxY, decimal Vie
                 throw Invalid("SVG guide geometry must remain inside its declared viewBox.");
             if (segment.StartX == segment.EndX && segment.StartY == segment.EndY)
                 throw Invalid("SVG guide geometry cannot contain zero-length segments.");
+        }
+
+        foreach (PcbSvgGuideShape shape in Shapes)
+        {
+            if (string.IsNullOrWhiteSpace(shape.ElementName)
+                || shape.SegmentStart < 0 || shape.SegmentCount <= 0
+                || shape.SegmentStart > Segments.Length - shape.SegmentCount)
+                throw Invalid("SVG guide shape metadata must identify a contiguous segment range.");
         }
     }
 
@@ -53,21 +88,31 @@ public static class PcbSvgGuideParser
                 throw Invalid("SVG transforms, scripts, images, text and external references are not allowed in a PCB guide.");
             var viewBox = Numbers((string?)root.Attribute("viewBox"), 4, "viewBox");
             var result = ImmutableArray.CreateBuilder<PcbSvgGuideSegment>();
+            var shapes = ImmutableArray.CreateBuilder<PcbSvgGuideShape>();
             foreach (var element in root.Descendants())
             {
+                int segmentStart = result.Count;
+                bool closed = false;
                 switch (element.Name.LocalName)
                 {
                     case "line": AddLine(result, Numbers((string?)element.Attribute("x1"), 1, "line x1")[0], Numbers((string?)element.Attribute("y1"), 1, "line y1")[0],
                         Numbers((string?)element.Attribute("x2"), 1, "line x2")[0], Numbers((string?)element.Attribute("y2"), 1, "line y2")[0], maximumSegments); break;
                     case "polyline": AddPoints(result, Numbers((string?)element.Attribute("points"), -1, "polyline points"), false, maximumSegments); break;
-                    case "polygon": AddPoints(result, Numbers((string?)element.Attribute("points"), -1, "polygon points"), true, maximumSegments); break;
-                    case "path": AddPath(result, (string?)element.Attribute("d"), maximumSegments); break;
+                    case "polygon": AddPoints(result, Numbers((string?)element.Attribute("points"), -1, "polygon points"), true, maximumSegments); closed = true; break;
+                    case "path":
+                        string path = (string?)element.Attribute("d") ?? throw Invalid("SVG path requires a d attribute.");
+                        AddPath(result, path, maximumSegments); closed = path.Any(character => character is 'Z' or 'z'); break;
                     case "svg": break;
                     case "g": break;
                     default: throw Invalid($"SVG element '{element.Name.LocalName}' is not supported in a PCB guide.");
                 }
+                if (result.Count > segmentStart)
+                    shapes.Add(Shape(element, segmentStart, result.Count - segmentStart, closed));
             }
-            var guide = new PcbSvgGuide(viewBox[0], viewBox[1], viewBox[2], viewBox[3], result.ToImmutable());
+            var guide = new PcbSvgGuide(viewBox[0], viewBox[1], viewBox[2], viewBox[3], result.ToImmutable())
+            {
+                Shapes = shapes.ToImmutable()
+            };
             guide.Validate(); return guide;
         }
         catch (AutomationException) { throw; }
@@ -108,6 +153,66 @@ public static class PcbSvgGuideParser
             if (upper == 'M') { x = nextX; y = nextY; startX = x; startY = y; command = relative ? 'l' : 'L'; }
             else { AddLine(result, x, y, nextX, nextY, max); x = nextX; y = nextY; }
         }
+    }
+
+    private static PcbSvgGuideShape Shape(XElement element, int segmentStart, int segmentCount, bool closed)
+    {
+        var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        bool unsupportedStyle = false;
+        foreach (XElement ancestor in element.AncestorsAndSelf().Reverse())
+        {
+            if (ancestor.Attribute("style") is XAttribute style)
+            {
+                // CSS inheritance and selectors are outside this deterministic
+                // subset. Retain the fact that a style exists instead of
+                // pretending the child has the fully-resolved presentation.
+                unsupportedStyle = true;
+                foreach (string declaration in style.Value.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    string[] pair = declaration.Split(':', 2);
+                    if (pair.Length != 2 || string.IsNullOrWhiteSpace(pair[0]))
+                        continue;
+                    attributes[pair[0].Trim()] = pair[1].Trim();
+                }
+            }
+        }
+
+        foreach (XAttribute attribute in element.Attributes())
+        {
+            if (attribute.Name.LocalName is "fill" or "stroke" or "stroke-width")
+                attributes[attribute.Name.LocalName] = attribute.Value.Trim();
+            else if (attribute.Name.LocalName == "style")
+                continue;
+        }
+
+        bool styleHasUnknownProperty = attributes.Keys.Any(key => key is not ("fill" or "stroke" or "stroke-width"));
+        unsupportedStyle |= styleHasUnknownProperty;
+        PcbSvgGuidePaint fill = Paint(attributes, "fill", ref unsupportedStyle);
+        PcbSvgGuidePaint stroke = Paint(attributes, "stroke", ref unsupportedStyle);
+        bool strokeWidthSpecified = attributes.ContainsKey("stroke-width");
+        if (strokeWidthSpecified && (!decimal.TryParse(attributes["stroke-width"], NumberStyles.Float,
+                CultureInfo.InvariantCulture, out decimal width) || width <= 0))
+            unsupportedStyle = true;
+
+        return new(element.Name.LocalName, segmentStart, segmentCount, closed, fill, stroke,
+            strokeWidthSpecified, unsupportedStyle);
+    }
+
+    private static PcbSvgGuidePaint Paint(Dictionary<string, string> attributes, string name, ref bool unsupported)
+    {
+        if (!attributes.TryGetValue(name, out string? value) || value.Length == 0)
+            return PcbSvgGuidePaint.Unspecified;
+        if (string.Equals(value, "none", StringComparison.OrdinalIgnoreCase))
+            return PcbSvgGuidePaint.None;
+        if (value.Contains("url(", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("var(", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("gradient", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("currentColor", StringComparison.OrdinalIgnoreCase))
+        {
+            unsupported = true;
+            return PcbSvgGuidePaint.Unsupported;
+        }
+        return PcbSvgGuidePaint.Paint;
     }
 
     private static decimal[] Numbers(string? text, int expected, string name)

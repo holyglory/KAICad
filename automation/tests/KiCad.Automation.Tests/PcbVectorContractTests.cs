@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using KiCad.Automation.Mcp;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -128,5 +129,50 @@ public sealed class PcbVectorContractTests
         Assert.AreEqual(0, segments[5].GetProperty("end").GetProperty("yNm").GetInt64());
         Assert.IsFalse(data.GetProperty("boardMutation").GetBoolean());
         Assert.IsFalse(data.GetProperty("nativeCommit").GetBoolean());
+    }
+
+    [TestMethod]
+    public void VectorValidationReportsExactEndpointTopologyAndResolvedOutlineStyle()
+    {
+        const string svg = "<svg viewBox=\"0 0 10 10\"><polygon fill=\"none\" stroke=\"#000\" stroke-width=\"0.25\" points=\"1,1 4,1 4,4\"/><line fill=\"none\" stroke=\"#000\" stroke-width=\"0.25\" x1=\"6\" y1=\"1\" x2=\"8\" y2=\"1\"/></svg>";
+        JsonElement data = new PcbVectorTools().ValidateSvg(svg).StructuredContent!.Value;
+
+        JsonElement topology = data.GetProperty("topology");
+        Assert.AreEqual(2, topology.GetProperty("shapeCount").GetInt32());
+        Assert.AreEqual(1, topology.GetProperty("closedShapeCount").GetInt32());
+        Assert.AreEqual(1, topology.GetProperty("openShapeCount").GetInt32());
+        Assert.AreEqual(4, topology.GetProperty("segmentCount").GetInt32());
+        Assert.AreEqual(5, topology.GetProperty("vertexCount").GetInt32());
+        Assert.AreEqual(2, topology.GetProperty("connectedComponents").GetInt32());
+        Assert.AreEqual(2, topology.GetProperty("danglingEndpoints").GetInt32());
+        Assert.IsTrue(topology.GetProperty("exactEndpointGraph").GetBoolean());
+        Assert.IsFalse(topology.GetProperty("selfIntersectionsChecked").GetBoolean());
+
+        JsonElement style = data.GetProperty("style");
+        Assert.AreEqual(0, style.GetProperty("unsupportedShapeCount").GetInt32());
+        Assert.AreEqual(2, style.GetProperty("fillNoneCount").GetInt32());
+        Assert.AreEqual(2, style.GetProperty("strokePaintCount").GetInt32());
+        Assert.AreEqual(2, style.GetProperty("strokeWidthSpecifiedCount").GetInt32());
+        Assert.IsTrue(style.GetProperty("fillSemanticsExplicit").GetBoolean());
+        Assert.IsTrue(style.GetProperty("strokeSemanticsExplicit").GetBoolean());
+        Assert.IsTrue(style.GetProperty("readyForOutlineCommit").GetBoolean());
+        Assert.IsTrue(data.GetProperty("authoritativeGeometryReady").GetBoolean());
+    }
+
+    [TestMethod]
+    public void VectorValidationKeepsFilledAndInheritedStylesExplicitlyUnresolved()
+    {
+        const string svg = "<svg viewBox=\"0 0 10 10\"><g style=\"fill:#f00;stroke:url(#gradient)\"><polygon points=\"1,1 4,1 4,4\"/></g></svg>";
+        JsonElement data = new PcbVectorTools().ValidateSvg(svg).StructuredContent!.Value;
+
+        JsonElement style = data.GetProperty("style");
+        Assert.AreEqual(1, style.GetProperty("unsupportedShapeCount").GetInt32());
+        Assert.AreEqual(1, style.GetProperty("fillPaintCount").GetInt32());
+        Assert.AreEqual(1, style.GetProperty("strokeUnsupportedCount").GetInt32());
+        Assert.IsTrue(style.GetProperty("fillSemanticsExplicit").GetBoolean());
+        Assert.IsTrue(style.GetProperty("strokeSemanticsExplicit").GetBoolean());
+        Assert.IsFalse(style.GetProperty("readyForOutlineCommit").GetBoolean());
+        Assert.IsFalse(data.GetProperty("authoritativeGeometryReady").GetBoolean());
+        StringAssert.Contains(style.GetProperty("limitation").GetString()!, "does not preserve SVG fill paint");
     }
 }

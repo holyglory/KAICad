@@ -59,15 +59,15 @@ public sealed class PcbVectorTools
                 layerName = boardLayer.ToString();
             }
 
-            var segments = parsed.Segments.Select(segment => new
-            {
-                start = Point(segment.StartX, segment.StartY, originX, originY, scale),
-                end = Point(segment.EndX, segment.EndY, originX, originY, scale)
-            }).ToArray();
-            long minX = segments.SelectMany(segment => new[] { segment.start.XNm, segment.end.XNm }).Min();
-            long minY = segments.SelectMany(segment => new[] { segment.start.YNm, segment.end.YNm }).Min();
-            long maxX = segments.SelectMany(segment => new[] { segment.start.XNm, segment.end.XNm }).Max();
-            long maxY = segments.SelectMany(segment => new[] { segment.start.YNm, segment.end.YNm }).Max();
+            var segments = parsed.Segments.Select(segment => new ConvertedSegment(
+                Point(segment.StartX, segment.StartY, originX, originY, scale),
+                Point(segment.EndX, segment.EndY, originX, originY, scale))).ToArray();
+            long minX = segments.SelectMany(segment => new[] { segment.Start.XNm, segment.End.XNm }).Min();
+            long minY = segments.SelectMany(segment => new[] { segment.Start.YNm, segment.End.YNm }).Min();
+            long maxX = segments.SelectMany(segment => new[] { segment.Start.XNm, segment.End.XNm }).Max();
+            long maxY = segments.SelectMany(segment => new[] { segment.Start.YNm, segment.End.YNm }).Max();
+            TopologyAnalysis topology = AnalyzeTopology(segments, parsed.Shapes);
+            StyleAnalysis style = AnalyzeStyle(parsed.Shapes);
 
             var result = new
             {
@@ -82,6 +82,9 @@ public sealed class PcbVectorTools
                 conversion = new { originXNm = originX, originYNm = originY, nanometersPerSvgUnit = scale, strokeWidthNm },
                 boundsNm = new { minXNm = minX, minYNm = minY, maxXNm = maxX, maxYNm = maxY },
                 segments,
+                topology,
+                style,
+                authoritativeGeometryReady = style.ReadyForOutlineCommit,
                 boardMutation = false,
                 nativeCommit = false,
                 electricalValidation = false,
@@ -129,6 +132,120 @@ public sealed class PcbVectorTools
     }
 
     private readonly record struct NanometrePoint(long XNm, long YNm);
+
+    private readonly record struct ConvertedSegment(NanometrePoint Start, NanometrePoint End);
+
+    private readonly record struct TopologyAnalysis(
+        int ShapeCount,
+        int ClosedShapeCount,
+        int OpenShapeCount,
+        int SegmentCount,
+        int VertexCount,
+        int ConnectedComponents,
+        int DanglingEndpoints,
+        int BranchPoints,
+        bool ExactEndpointGraph,
+        bool SelfIntersectionsChecked,
+        string Limitation);
+
+    private readonly record struct StyleAnalysis(
+        int UnsupportedShapeCount,
+        int FillNoneCount,
+        int FillPaintCount,
+        int FillUnspecifiedCount,
+        int FillUnsupportedCount,
+        int StrokeNoneCount,
+        int StrokePaintCount,
+        int StrokeUnspecifiedCount,
+        int StrokeUnsupportedCount,
+        int StrokeWidthSpecifiedCount,
+        bool FillSemanticsExplicit,
+        bool StrokeSemanticsExplicit,
+        bool ReadyForOutlineCommit,
+        string Limitation);
+
+    private static TopologyAnalysis AnalyzeTopology(
+        IReadOnlyList<ConvertedSegment> segments, IReadOnlyList<PcbSvgGuideShape> shapes)
+    {
+        // This graph is deliberately built from converted integer coordinates.
+        // It proves exact endpoint connectivity, while crossings in the middle
+        // of segments remain outside this inexpensive managed boundary.
+        var vertices = new Dictionary<(long X, long Y), int>();
+        var degree = new Dictionary<(long X, long Y), int>();
+        var parent = new List<int>();
+
+        int Vertex((long X, long Y) point)
+        {
+            if (vertices.TryGetValue(point, out int existing))
+                return existing;
+            int id = parent.Count;
+            vertices.Add(point, id);
+            parent.Add(id);
+            degree[point] = 0;
+            return id;
+        }
+
+        int Root(int value)
+        {
+            while (parent[value] != value)
+            {
+                parent[value] = parent[parent[value]];
+                value = parent[value];
+            }
+            return value;
+        }
+
+        void Union(int left, int right)
+        {
+            left = Root(left); right = Root(right);
+            if (left != right) parent[right] = left;
+        }
+
+        foreach (ConvertedSegment segment in segments)
+        {
+            (long X, long Y) start = (segment.Start.XNm, segment.Start.YNm);
+            (long X, long Y) end = (segment.End.XNm, segment.End.YNm);
+            int left = Vertex(start), right = Vertex(end);
+            degree[start]++; degree[end]++;
+            Union(left, right);
+        }
+
+        int components = vertices.Count == 0 ? 0 : vertices.Values.Select(Root).Distinct().Count();
+        return new(
+            shapes.Count,
+            shapes.Count(shape => shape.Closed),
+            shapes.Count(shape => !shape.Closed),
+            segments.Count,
+            vertices.Count,
+            components,
+            degree.Values.Count(value => value == 1),
+            degree.Values.Count(value => value > 2),
+            true,
+            false,
+            "Exact converted endpoints are grouped; segment crossings and filled-area topology require native geometry analysis.");
+    }
+
+    private static StyleAnalysis AnalyzeStyle(IReadOnlyList<PcbSvgGuideShape> shapes)
+    {
+        int unsupported = shapes.Count(shape => shape.UnsupportedStyle);
+        int fillNone = shapes.Count(shape => shape.Fill == PcbSvgGuidePaint.None);
+        int fillPaint = shapes.Count(shape => shape.Fill == PcbSvgGuidePaint.Paint);
+        int fillUnspecified = shapes.Count(shape => shape.Fill == PcbSvgGuidePaint.Unspecified);
+        int fillUnsupported = shapes.Count(shape => shape.Fill == PcbSvgGuidePaint.Unsupported);
+        int strokeNone = shapes.Count(shape => shape.Stroke == PcbSvgGuidePaint.None);
+        int strokePaint = shapes.Count(shape => shape.Stroke == PcbSvgGuidePaint.Paint);
+        int strokeUnspecified = shapes.Count(shape => shape.Stroke == PcbSvgGuidePaint.Unspecified);
+        int strokeUnsupported = shapes.Count(shape => shape.Stroke == PcbSvgGuidePaint.Unsupported);
+        bool fillExplicit = shapes.Count > 0 && shapes.All(shape => shape.Fill != PcbSvgGuidePaint.Unspecified);
+        bool strokeExplicit = shapes.Count > 0 && shapes.All(shape => shape.Stroke != PcbSvgGuidePaint.Unspecified);
+        bool ready = shapes.Count > 0 && !shapes.Any(shape => shape.UnsupportedStyle)
+            && shapes.All(shape => shape.Fill == PcbSvgGuidePaint.None);
+        return new(
+            unsupported, fillNone, fillPaint, fillUnspecified, fillUnsupported,
+            strokeNone, strokePaint, strokeUnspecified, strokeUnsupported,
+            shapes.Count(shape => shape.StrokeWidthSpecified), fillExplicit, strokeExplicit, ready,
+            "The managed conversion emits outline strokes and does not preserve SVG fill paint, stroke paint, CSS inheritance or gradients.");
+    }
 
     private static void ValidateGuideLayer(BoardLayer layer)
     {

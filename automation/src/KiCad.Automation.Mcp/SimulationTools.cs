@@ -329,8 +329,8 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
         if (receipts.ReadTerminal(instanceId, expectedInstanceEpoch, jobId) is { } archive)
         {
             if (!archive.Operation.Document.Equals(target))
-                throw new AutomationException("simulation_result_not_found",
-                    "No terminal simulation archive matches that original schematic document.");
+                throw new AutomationException("simulation_unavailable",
+                    "No terminal simulation archive matches that schematic document; cancellation was not attempted.");
             return ArchivedData(archive, target);
         }
         var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);

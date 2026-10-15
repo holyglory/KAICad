@@ -67,8 +67,9 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
         if (response.Items.Count > request.MaxObjects)
             throw new AutomationException("pcb_render_geometry_oversized", $"The native query returned {response.Items.Count} items; narrow the layer or object-type filters.");
 
-        HashSet<BoardLayer>? requestedLayers = request.Layers.Length == 0
-            ? null : request.Layers.Select(ParseLayer).ToHashSet();
+        BoardLayer[] requestedLayerValues = request.Layers.Select(ParseLayer).Distinct().ToArray();
+        HashSet<BoardLayer>? requestedLayers = requestedLayerValues.Length == 0
+            ? null : requestedLayerValues.ToHashSet();
         HashSet<string>? requestedTypes = request.ObjectTypes.Length == 0
             ? null : request.ObjectTypes.ToHashSet(StringComparer.OrdinalIgnoreCase);
         Any[] selected = response.Items.Where(item => TryDescribe(item, out string type, out BoardLayer[] layers)
@@ -137,6 +138,8 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
                     maxXNm = request.Viewport.MaxXNm, maxYNm = request.Viewport.MaxYNm },
                 yAxis = "down", formula = "x=(xNm-minXNm)*width/(maxXNm-minXNm); y=(maxYNm-yNm)*height/(maxYNm-minYNm)"
             },
+            selection = BuildLayerSelection(requestedLayerValues),
+            renderCoverage = BuildRenderCoverage(requestedLayerValues, request.IncludeGeometry),
             items, itemCount = items.Count, nativeQuery = true, nativeBounds = true,
             boardMutation = false, rasterImage = false, drcValidated = false
         }, JsonOptions);
@@ -160,6 +163,67 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
         public long MinYNm { get; set; }
         public long MaxXNm { get; set; }
         public long MaxYNm { get; set; }
+    }
+
+    /// <summary>
+    /// Describes how the native geometry query interprets a layer selector.
+    /// A composite query is represented by an empty layer list; a subset query
+    /// keeps every native layer membership on multi-layer objects such as vias,
+    /// pads and zones so callers cannot mistake selection for clipping geometry.
+    /// </summary>
+    internal sealed record LayerSelectionMetadata(
+        string Mode,
+        IReadOnlyList<string> Layers,
+        string Membership,
+        bool SupportsLayerSubset,
+        bool SupportsComposite,
+        bool MultiLayerObjectsRetainAllLayers);
+
+    /// <summary>
+    /// Records the evidence boundary of this tool.  It projects native bounds
+    /// and optional control geometry; it does not produce a raster or prove
+    /// visible pixels, depth ordering or DRC overlays.
+    /// </summary>
+    internal sealed record RenderCoverageMetadata(
+        bool NativeBounds,
+        bool NativeGeometry,
+        bool DeterministicPixelBounds,
+        bool RasterImage,
+        bool ExactVisiblePixels,
+        bool OcclusionDepth,
+        bool CompleteLayerOverlays,
+        bool DrcOverlays,
+        IReadOnlyList<string> Limitations);
+
+    internal static LayerSelectionMetadata BuildLayerSelection(IEnumerable<BoardLayer> layers)
+    {
+        BoardLayer[] canonical = layers.Distinct().ToArray();
+        return new LayerSelectionMetadata(
+            canonical.Length == 0 ? "composite" : "layer-subset",
+            canonical.Select(layer => layer.ToString()).ToArray(),
+            "any-selected-layer",
+            SupportsLayerSubset: true,
+            SupportsComposite: true,
+            MultiLayerObjectsRetainAllLayers: true);
+    }
+
+    internal static RenderCoverageMetadata BuildRenderCoverage(IEnumerable<BoardLayer> layers, bool includeGeometry)
+    {
+        _ = layers; // The coverage boundary is the same for each selector mode.
+        return new RenderCoverageMetadata(
+            NativeBounds: true,
+            NativeGeometry: includeGeometry,
+            DeterministicPixelBounds: true,
+            RasterImage: false,
+            ExactVisiblePixels: false,
+            OcclusionDepth: false,
+            CompleteLayerOverlays: false,
+            DrcOverlays: false,
+            Limitations:
+            [
+                "Native bounds and control geometry are inspection metadata; this tool returns no raster image.",
+                "Exact visible pixels, occlusion depth and DRC overlays require a native render evidence boundary."
+            ]);
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)

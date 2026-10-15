@@ -24,6 +24,44 @@ public sealed class PcbGeometryManifestTests
     }
 
     [TestMethod]
+    public void GeometrySelectionMetadataDistinguishesLayerSubsetFromCompositeAndPreservesMultilayerMembership()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var subset = JsonSerializer.SerializeToElement(PcbGeometryManifestTools.BuildLayerSelection(
+            [BoardLayer.BlFCu, BoardLayer.BlBCu, BoardLayer.BlFCu]), options);
+        Assert.AreEqual("layer-subset", subset.GetProperty("mode").GetString());
+        CollectionAssert.AreEqual(new[] { "BlFCu", "BlBCu" },
+            subset.GetProperty("layers").EnumerateArray().Select(layer => layer.GetString()).ToArray());
+        Assert.AreEqual("any-selected-layer", subset.GetProperty("membership").GetString());
+        Assert.IsTrue(subset.GetProperty("supportsLayerSubset").GetBoolean());
+        Assert.IsTrue(subset.GetProperty("supportsComposite").GetBoolean());
+        Assert.IsTrue(subset.GetProperty("multiLayerObjectsRetainAllLayers").GetBoolean());
+
+        var composite = JsonSerializer.SerializeToElement(
+            PcbGeometryManifestTools.BuildLayerSelection([]), options);
+        Assert.AreEqual("composite", composite.GetProperty("mode").GetString());
+        Assert.HasCount(0, composite.GetProperty("layers").EnumerateArray());
+    }
+
+    [TestMethod]
+    public void GeometryCoverageDoesNotClaimRasterPixelsOcclusionOrDrcOverlays()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var coverage = JsonSerializer.SerializeToElement(PcbGeometryManifestTools.BuildRenderCoverage(
+            [BoardLayer.BlFCu], includeGeometry: true), options);
+        Assert.IsTrue(coverage.GetProperty("nativeBounds").GetBoolean());
+        Assert.IsTrue(coverage.GetProperty("nativeGeometry").GetBoolean());
+        Assert.IsTrue(coverage.GetProperty("deterministicPixelBounds").GetBoolean());
+        Assert.IsFalse(coverage.GetProperty("rasterImage").GetBoolean());
+        Assert.IsFalse(coverage.GetProperty("exactVisiblePixels").GetBoolean());
+        Assert.IsFalse(coverage.GetProperty("occlusionDepth").GetBoolean());
+        Assert.IsFalse(coverage.GetProperty("completeLayerOverlays").GetBoolean());
+        Assert.IsFalse(coverage.GetProperty("drcOverlays").GetBoolean());
+        StringAssert.Contains(string.Join(" ", coverage.GetProperty("limitations").EnumerateArray()
+            .Select(item => item.GetString())), "no raster image");
+    }
+
+    [TestMethod]
     public void GeometryProjectionUsesImageYAxisAndReportsUnclippedViewportIntersection()
     {
         var viewport = new PcbGeometryManifestTools.Viewport

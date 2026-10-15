@@ -245,24 +245,28 @@ public sealed class PcbDrcToolTests
             schematic.Document.SheetPath.Path.Add(new Kiapi.Common.Types.KIID { Value = Guid.NewGuid().ToString("D") });
             transport.State.CheckedSchematicState = schematic.Clone();
             string schematicJson = SchematicJson.Formatter.Format(schematic);
-            var parity = await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+            // The durable receipt binds one operation UUID to the complete
+            // request, including parity options; use a new identity here.
+            string parityOperationId = Guid.NewGuid().ToString("D");
+            transport.State.OperationId = parityOperationId;
+            var parity = await tool.Start(transport.Session.InstanceId, json, parityOperationId,
                 false, false, true, revisionJson, transport.Session.Epoch, default, schematicJson, true);
             Assert.IsFalse(parity.IsError ?? false, parity.ToString());
             var transmittedSchematic = transport.LastStart!.ExpectedSchematicState;
             Assert.AreEqual(schematic, transmittedSchematic);
             Assert.IsTrue(transport.LastStart.AllowDuplicateSheetNames);
             int beforeInvalid = transport.Calls;
-            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, parityOperationId,
                 false, false, true, revisionJson, transport.Session.Epoch, default)).IsError ?? false);
-            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, parityOperationId,
                 false, false, false, revisionJson, transport.Session.Epoch, default, schematicJson)).IsError ?? false);
             var wrongSource = schematic.Clone(); wrongSource.ProcessEpoch = Guid.NewGuid().ToString("D");
-            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, parityOperationId,
                 false, false, true, revisionJson, transport.Session.Epoch, default,
                 SchematicJson.Formatter.Format(wrongSource))).IsError ?? false);
             Assert.AreEqual(beforeInvalid, transport.Calls);
             transport.State.CheckedSchematicState.StateSha256 = new string('b', 64);
-            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+            Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, parityOperationId,
                 false, false, true, revisionJson, transport.Session.Epoch, default, schematicJson)).IsError ?? false,
                 "A different checked schematic cannot be accepted as this operation's result.");
 
@@ -586,6 +590,64 @@ public sealed class PcbDrcToolTests
             Assert.IsFalse(cancel.IsError ?? false, cancel.ToString());
             Assert.AreEqual(jobId, cancel.StructuredContent!.Value.GetProperty("jobId").GetString());
             Assert.AreEqual(3, transport.Calls);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public async Task DurableOperationReceiptToolSurvivesToolRecreationAndRejectsEpochChange()
+    {
+        string directory = Directory.CreateTempSubdirectory("drc-operation-receipt-").FullName;
+        try
+        {
+            var transport = new JobTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var document = new DocumentSpecifier { Type = DocumentType.DoctypePcb, BoardFilename = "fixture.kicad_pcb",
+                Project = new() { Name = "fixture", Path = directory } };
+            string operationId = Guid.NewGuid().ToString("D");
+            transport.State = new PcbDrcJobState
+            {
+                Document = document.Clone(), JobId = Guid.NewGuid().ToString("D"), OperationId = operationId,
+                ProcessEpoch = transport.Session.Epoch, CheckedRevision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 3 },
+                Status = PcbDrcJobStatus.PdrcjsCompleted, Progress = 1, WorkerFinished = true,
+                SnapshotComplete = true, ResultsFresh = true
+            };
+            var tool = new PcbDrcTools(registry);
+            string documentJson = SchematicJson.Formatter.Format(document);
+            string revisionJson = SchematicJson.Formatter.Format(transport.State.CheckedRevision);
+            var started = await tool.Start(transport.Session.InstanceId, documentJson, operationId,
+                false, false, false, revisionJson, transport.Session.Epoch, default);
+            Assert.IsFalse(started.IsError ?? false, started.ToString());
+
+            var reopenedTool = new PcbDrcTools(registry);
+            var input = new PcbDrcOperationReceiptInput
+            {
+                Document = new NativeDocumentInput
+                {
+                    Type = NativeDocumentType.Pcb, BoardFilename = "fixture.kicad_pcb",
+                    Project = new NativeProjectInput { Name = "fixture", Path = directory }
+                },
+                OperationId = operationId,
+                ProcessEpoch = transport.Session.Epoch
+            };
+            var receipt = await reopenedTool.OperationReceiptTyped(transport.Session.InstanceId, input, default);
+            Assert.IsFalse(receipt.IsError ?? false, receipt.ToString());
+            Assert.IsTrue(receipt.StructuredContent!.Value.GetProperty("found").GetBoolean());
+            Assert.AreEqual("mcp-state", receipt.StructuredContent.Value.GetProperty("receiptScope").GetString());
+            Assert.AreEqual("Completed", receipt.StructuredContent.Value.GetProperty("outcome").GetString());
+
+            var staleInput = new PcbDrcOperationReceiptInput
+            {
+                Document = input.Document,
+                OperationId = operationId,
+                ProcessEpoch = Guid.NewGuid().ToString("D")
+            };
+            var stale = await reopenedTool.OperationReceiptTyped(transport.Session.InstanceId, staleInput, default);
+            Assert.IsTrue(stale.IsError ?? false, stale.ToString());
+            Assert.AreEqual("stale_process_epoch", stale.StructuredContent!.Value.GetProperty("code").GetString());
         }
         finally { Directory.Delete(directory, true); }
     }

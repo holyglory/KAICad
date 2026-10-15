@@ -21,6 +21,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbDrcTools(InstanceRegistry registry)
 {
     private static readonly ConcurrentDictionary<string, CandidateReceipt> CandidateReceipts = new(StringComparer.Ordinal);
+    private readonly PcbDrcReceiptStore receipts = new(registry.StateDirectory);
     [McpServerTool(Name = "kicad_pcb_drc_start"),
      Description("Start a revision-guarded native PCB DRC job for an explicit PCB document. Requires process epoch, document revision and canonical lowercase operation identity; returned job and revision identities are also canonical lowercase UUIDs. Optional schematic parity checks require the exact observed schematic state. candidateRequestJson may contain explicit Track/Arc/Via items for a detached dry-run qualification; those candidates are never added to the live board. KiCad captures, at the requested revision, every input the enabled tests read: the board with the identity of each of its objects (teardrops included), the project with its design, net-class and text-variable settings, the board's current variant, the custom rules file, the footprint libraries, the drawing sheet, the router settings, exclusions with their comments, the current date or version-control revision when the board's text shows it (also the day an @{...} expression reads with today()), the content of each font file the board's text is laid out with (fonts embedded in the board are part of it) and, with testFootprints, the observed schematic. snapshotComplete is true only when all of them were captured exactly; otherwise inputWarnings says why in an entry that starts with 'snapshot_incomplete: '. A board whose text shows the time of day, which changes while the check runs, is never complete ('snapshot_incomplete: current_time_text'), and neither is one whose text or drawing sheet evaluates an @{...} expression that reads the time, chance or the version-control repository, such as now(), random() or vcsbranch(), or calls a function KiCad does not evaluate from the design alone ('snapshot_incomplete: volatile_text_expression'), also when a variable or another expression builds that call, because the check resolves each text as KiCad lays it out before it looks for calls; a font file the check cannot read gives 'snapshot_incomplete: font_file'. Until a job's worker has finished, snapshotComplete is false with 'snapshot_incomplete: finding_identity_pending', because only a finished check has matched each finding to an object of the open board. Ordinary and candidate jobs follow the same rule. Returns a job snapshot and does not claim completion until kicad_pcb_drc_job reports a terminal result."),
      KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document revision, operation ID"),
@@ -80,6 +81,33 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_drc_group_changes", "Grouped route DRC requires the exact route candidate and removal payload.");
             if (candidate is not null && candidate.Items.Count == 0 && delete is null)
                 throw new AutomationException("invalid_drc_candidate", "A detached route check requires at least one create, replacement or removal.");
+            string canonicalDocument = SchematicJson.Formatter.Format(document);
+            string canonicalRevision = SchematicJson.Formatter.Format(expected);
+            string canonicalCandidate = candidate is null ? "" : BoardJson.Formatter.Format(candidate);
+            string canonicalDelete = delete is null ? "" : BoardJson.Formatter.Format(delete);
+            string canonicalGroups = CanonicalGroupChanges(groupChanges);
+            string candidateHash = candidate is null ? "" : CanonicalCandidate(candidate);
+            string fingerprint = PcbDrcReceiptStore.Fingerprint(instanceId, id, processEpoch,
+                canonicalDocument, canonicalRevision, canonicalCandidate, canonicalDelete, canonicalGroups,
+                expectedSchematicStateJson, refillZones, reportAllTrackErrors, testFootprints,
+                allowDuplicateSheetNames);
+            // Hold the per-operation lease across admission, native dispatch and
+            // terminal journal write. A second MCP process cannot race this
+            // operation into a duplicate native DRC request.
+            using var receiptLease = receipts.Acquire(instanceId, id);
+            var reservation = receipts.ReserveHeld(instanceId, id, processEpoch, canonicalDocument,
+                canonicalRevision, canonicalCandidate, canonicalDelete, canonicalGroups, fingerprint, candidateHash);
+            if (!reservation.Created && reservation.Receipt.Outcome == PcbDrcReceiptOutcome.Completed)
+            {
+                if (reservation.Receipt.ResultJson is null)
+                    throw new AutomationException("drc_receipt_corrupt", "A completed PCB DRC receipt has no retained result.");
+                try { state = SchematicJson.Parser.Parse<PcbDrcJobState>(reservation.Receipt.ResultJson); }
+                catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+                { throw new AutomationException("drc_receipt_corrupt", "The retained PCB DRC result is invalid: " + error.Message); }
+                ValidateJobState(state, document, processEpoch);
+                RestoreCandidateReceipt(reservation.Receipt, state);
+                return reservation.Receipt.ResultJson;
+            }
             var request = new StartPcbDrcJob
             {
                 Document = document,
@@ -95,15 +123,49 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             if (candidate is not null) request.CandidateItems.Add(candidate.Items);
             if (delete is not null) request.DeleteItemIds.Add(delete.ItemIds);
             request.GroupChanges.Add(groupChanges);
-            state = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(request, cancellationToken);
-            ValidateJobState(state, document, client.Epoch);
-            if (state.OperationId != id || !expected.Equals(state.CheckedRevision))
-                throw new AutomationException("invalid_drc_job_state", "Native DRC admission does not match the requested operation and revision.");
-            if (!Equals(schematic, state.CheckedSchematicState))
-                throw new AutomationException("invalid_drc_job_state", "Native DRC admission does not match the requested source schematic.");
-            if (state.CandidateDryRun != (candidate is not null)
-                || state.CandidateItemIds.Count != (candidate?.Items.Count ?? 0))
-                throw new AutomationException("invalid_drc_job_state", "Native DRC did not preserve the detached candidate identity contract.");
+            try
+            {
+                state = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(request, cancellationToken);
+            }
+            catch (NngException error)
+            {
+                receipts.MarkUnknownHeld(instanceId, id, error.RequestDelivered,
+                    error.RequestDelivered ? "operation_outcome_unknown" : "native_not_reached", error.Message);
+                if (error.RequestDelivered)
+                    throw new AutomationException("operation_outcome_unknown",
+                        "KiCad received the PCB DRC request but did not answer; inspect its operation receipt before retrying.");
+                throw;
+            }
+            catch (OperationCanceledException error)
+            {
+                receipts.MarkUnknownHeld(instanceId, id, null, "operation_outcome_unknown", error.Message);
+                throw;
+            }
+            catch (Exception error) when (error is NativeApiException or AutomationException
+                or InvalidProtocolBufferException or InvalidJsonException)
+            {
+                // A native reply that cannot be validated is evidence that the
+                // request reached KiCad, but never evidence that it was absent.
+                receipts.MarkUnknownHeld(instanceId, id, true, "operation_outcome_unknown", error.Message);
+                throw;
+            }
+            try
+            {
+                ValidateJobState(state, document, client.Epoch);
+                if (state.OperationId != id || !expected.Equals(state.CheckedRevision))
+                    throw new AutomationException("invalid_drc_job_state", "Native DRC admission does not match the requested operation and revision.");
+                if (!Equals(schematic, state.CheckedSchematicState))
+                    throw new AutomationException("invalid_drc_job_state", "Native DRC admission does not match the requested source schematic.");
+                if (state.CandidateDryRun != (candidate is not null)
+                    || state.CandidateItemIds.Count != (candidate?.Items.Count ?? 0))
+                    throw new AutomationException("invalid_drc_job_state", "Native DRC did not preserve the detached candidate identity contract.");
+            }
+            catch (Exception error) when (error is NativeApiException or AutomationException
+                or InvalidProtocolBufferException or InvalidJsonException)
+            {
+                receipts.MarkUnknownHeld(instanceId, id, true, "operation_outcome_unknown", error.Message);
+                throw;
+            }
             if (candidate is not null)
             {
                 string startedJobId = state.JobId;
@@ -119,28 +181,55 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 // The native read handler performs payload comparison from the
                 // expected-candidate field; send the same request through the
                 // typed client rather than trusting IDs or the start snapshot.
-                var verificationRequest = new NativeCapabilityPcbDrcReplacementJob
-                { Document = document, JobId = state.JobId, ProcessEpoch = client.Epoch };
-                verificationRequest.ExpectedCandidateItems.Add(candidate.Items);
-                if (delete is not null)
-                    verificationRequest.ExpectedDeleteItemIds.Add(delete.ItemIds);
-                verificationRequest.ExpectedGroupChanges.Add(groupChanges);
-                var verified = await client.InvokeAsync<NativeCapabilityPcbDrcReplacementJob, PcbDrcJobState>(verificationRequest, cancellationToken);
-                ValidateJobState(verified, document, client.Epoch);
-                if (verified.JobId != startedJobId
-                    || verified.OperationId != startedOperationId
-                    || !startedRevision.Equals(verified.CheckedRevision)
-                    || !Equals(startedSchematic, verified.CheckedSchematicState)
-                    || !verified.CandidateDryRun
-                    || !verified.CandidatePayloadVerified
-                    || !verified.CandidateItemIds.SequenceEqual(startedCandidateIds, StringComparer.Ordinal))
-                    throw new AutomationException("invalid_drc_candidate_receipt",
-                        "Native DRC candidate verification returned a different job, operation, revision, source or candidate identity.");
-                state = verified;
-                CandidateReceipts[state.JobId] = new CandidateReceipt(
-                    client.Epoch, document, expected.Clone(), CanonicalCandidate(candidate),
-                    delete?.ItemIds.Select(item => item.Value).Order(StringComparer.Ordinal).ToArray() ?? []);
+                try
+                {
+                    var verificationRequest = new NativeCapabilityPcbDrcReplacementJob
+                    { Document = document, JobId = state.JobId, ProcessEpoch = client.Epoch };
+                    verificationRequest.ExpectedCandidateItems.Add(candidate.Items);
+                    if (delete is not null)
+                        verificationRequest.ExpectedDeleteItemIds.Add(delete.ItemIds);
+                    verificationRequest.ExpectedGroupChanges.Add(groupChanges);
+                    var verified = await client.InvokeAsync<NativeCapabilityPcbDrcReplacementJob, PcbDrcJobState>(verificationRequest, cancellationToken);
+                    ValidateJobState(verified, document, client.Epoch);
+                    if (verified.JobId != startedJobId
+                        || verified.OperationId != startedOperationId
+                        || !startedRevision.Equals(verified.CheckedRevision)
+                        || !Equals(startedSchematic, verified.CheckedSchematicState)
+                        || !verified.CandidateDryRun
+                        || !verified.CandidatePayloadVerified
+                        || !verified.CandidateItemIds.SequenceEqual(startedCandidateIds, StringComparer.Ordinal))
+                        throw new AutomationException("invalid_drc_candidate_receipt",
+                            "Native DRC candidate verification returned a different job, operation, revision, source or candidate identity.");
+                    state = verified;
+                }
+                catch (NngException error)
+                {
+                    receipts.MarkUnknownHeld(instanceId, id, true, "operation_outcome_unknown", error.Message);
+                    throw new AutomationException("operation_outcome_unknown",
+                        "KiCad started the PCB DRC candidate but its payload receipt was not returned; inspect the operation receipt before retrying.");
+                }
+                catch (OperationCanceledException error)
+                {
+                    receipts.MarkUnknownHeld(instanceId, id, true, "operation_outcome_unknown", error.Message);
+                    throw;
+                }
+                catch (Exception error) when (error is NativeApiException or AutomationException
+                    or InvalidProtocolBufferException or InvalidJsonException)
+                {
+                    receipts.MarkUnknownHeld(instanceId, id, true, "operation_outcome_unknown", error.Message);
+                    throw;
+                }
             }
+            string resultJson = SchematicJson.Formatter.Format(state);
+            if (state.Status == PcbDrcJobStatus.PdrcjsStale)
+                receipts.MarkStaleHeld(instanceId, id, client.Epoch, state.JobId, resultJson,
+                    state.ErrorCode, state.ErrorMessage);
+            else
+                receipts.MarkCompletedHeld(instanceId, id, client.Epoch, state.JobId, resultJson);
+            if (candidate is not null)
+                CandidateReceipts[state.JobId] = new CandidateReceipt(
+                    client.Epoch, document, expected.Clone(), candidateHash,
+                    delete?.ItemIds.Select(item => item.Value).Order(StringComparer.Ordinal).ToArray() ?? []);
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
@@ -273,6 +362,14 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             var session = await client.HandshakeAsync(cancellationToken);
             if (session.InstanceId != instanceId || session.Epoch != epoch)
                 throw new AutomationException("stale_process_epoch", "The DRC operation belongs to another native process epoch.");
+            var durable = receipts.Read(instanceId, id);
+            if (durable is not null)
+            {
+                if (durable.ProcessEpoch != epoch)
+                    throw new AutomationException("stale_process_epoch", "The durable DRC operation belongs to another native process epoch.");
+                if (durable.DocumentJson != SchematicJson.Formatter.Format(target))
+                    throw new AutomationException("drc_receipt_identity_mismatch", "The durable DRC operation belongs to another PCB document.");
+            }
 
             NativeCapabilityPcbDrcReadOperationResponse native;
             try
@@ -299,6 +396,20 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup reported found=false with a job state.");
             if (!native.Found)
+            {
+                if (durable is { Outcome: PcbDrcReceiptOutcome.Prepared or PcbDrcReceiptOutcome.Unknown })
+                    return JsonSerializer.SerializeToElement(new
+                    {
+                        instanceId,
+                        processEpoch = epoch,
+                        document = target,
+                        operationId = id,
+                        found = false,
+                        lookupSupported = true,
+                        retrySafety = "unknown-native-outcome",
+                        receiptScope = "mcp-state",
+                        durableOutcome = durable.Outcome.ToString()
+                    });
                 return JsonSerializer.SerializeToElement(new
                 {
                     instanceId,
@@ -309,6 +420,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                     lookupSupported = true,
                     retrySafety = "unknown-native-outcome"
                 });
+            }
             if (native.Job is null)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup reported found=true without a job state.");
@@ -317,7 +429,18 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup returned a job for a different operation.");
             ForgetCandidateReceiptOnStale(native.Job);
-            using var jobJson = JsonDocument.Parse(SchematicJson.Formatter.Format(native.Job));
+            string nativeResultJson = SchematicJson.Formatter.Format(native.Job);
+            if (durable is not null)
+            {
+                if (native.Job.Status == PcbDrcJobStatus.PdrcjsStale)
+                    durable = receipts.MarkStale(instanceId, id, epoch, native.Job.JobId, nativeResultJson,
+                        native.Job.ErrorCode, native.Job.ErrorMessage);
+                else if (durable.CandidateJson.Length == 0 || native.Job.CandidatePayloadVerified)
+                    durable = receipts.MarkCompleted(instanceId, id, epoch, native.Job.JobId, nativeResultJson);
+                if (durable.CandidateJson.Length != 0 && native.Job.CandidatePayloadVerified)
+                    RestoreCandidateReceipt(durable, native.Job);
+            }
+            using var jobJson = JsonDocument.Parse(nativeResultJson);
             return JsonSerializer.SerializeToElement(new
             {
                 instanceId,
@@ -326,7 +449,9 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 operationId = id,
                 found = true,
                 lookupSupported = true,
-                job = jobJson.RootElement.Clone()
+                job = jobJson.RootElement.Clone(),
+                receiptScope = durable is null ? "native-process" : "native-process-with-mcp-state",
+                durableOutcome = durable?.Outcome.ToString()
             });
         });
 
@@ -348,6 +473,84 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             return TypedError(error);
         }
     }
+
+    [McpServerTool(Name = "kicad_pcb_drc_operation_receipt", ReadOnly = true),
+     Description("Read the durable MCP-side admission receipt for one PCB DRC operation after an MCP reconnect. The receipt preserves the exact document, revision, candidate and process-epoch binding, but never substitutes for KiCad's native job result. A changed native epoch is rejected; an unknown or prepared record remains unknown and is never replayed automatically."),
+     KiCadCapability("pcb", "durable-mcp-receipt", "typed PCB document, process epoch and operation ID"),
+     KiCadVerification(KiCadVerificationLevel.InProcess, "PcbDrcReceiptStoreTests.DurableReceiptSurvivesStoreRecreation")]
+    public async Task<CallToolResult> OperationReceiptTyped(string instanceId,
+        PcbDrcOperationReceiptInput input, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var payload = input.ToPayload();
+            return await OperationReceipt(instanceId, payload.Document, payload.OperationId,
+                payload.ProcessEpoch, cancellationToken);
+        }
+        catch (AutomationException error)
+        {
+            return TypedError(error);
+        }
+    }
+
+    private Task<CallToolResult> OperationReceipt(string instanceId, NativeDocumentInput document,
+        string operationId, string processEpoch, CancellationToken cancellationToken) =>
+        InstanceToolBoundary.Run(async () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string id = OperationId(operationId);
+            string epoch = ProcessEpoch(processEpoch);
+            DocumentSpecifier target = NativeDocumentInput.ToNative(document);
+            ValidatePcb(target);
+            var client = registry.Client(instanceId);
+            var session = await client.HandshakeAsync(cancellationToken);
+            if (session.InstanceId != instanceId || session.Epoch != epoch)
+                throw new AutomationException("stale_process_epoch", "The durable DRC receipt belongs to another native process epoch.");
+            var durable = receipts.Read(instanceId, id);
+            if (durable is null)
+                return JsonSerializer.SerializeToElement(new
+                {
+                    instanceId, processEpoch = epoch, document = target, operationId = id,
+                    found = false, receiptScope = "mcp-state", nativeReceiptAvailable = false
+                });
+            if (durable.ProcessEpoch != epoch)
+                throw new AutomationException("stale_process_epoch", "The durable DRC receipt belongs to another native process epoch.");
+            if (durable.DocumentJson != SchematicJson.Formatter.Format(target))
+                throw new AutomationException("drc_receipt_identity_mismatch", "The durable DRC receipt belongs to another PCB document.");
+            JsonElement? result = durable.ResultJson is null
+                ? null : JsonDocument.Parse(durable.ResultJson).RootElement.Clone();
+            if (durable.ResultJson is not null)
+            {
+                try
+                {
+                    var retained = SchematicJson.Parser.Parse<PcbDrcJobState>(durable.ResultJson);
+                    ValidateJobState(retained, target, epoch);
+                    RestoreCandidateReceipt(durable, retained);
+                }
+                catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException
+                    or AutomationException)
+                { throw new AutomationException("drc_receipt_corrupt", "The retained PCB DRC result is invalid: " + error.Message); }
+            }
+            return JsonSerializer.SerializeToElement(new
+            {
+                instanceId,
+                processEpoch = epoch,
+                document = target,
+                operationId = id,
+                jobId = durable.JobId,
+                found = true,
+                receiptScope = "mcp-state",
+                nativeReceiptAvailable = false,
+                outcome = durable.Outcome.ToString(),
+                retrySafety = durable.Outcome == PcbDrcReceiptOutcome.Retryable
+                    ? "safe-native-not-reached" : "unknown-native-outcome",
+                requestFingerprintSha256 = durable.RequestFingerprintSha256,
+                candidateHash = durable.CandidateHash,
+                result,
+                errorCode = durable.ErrorCode,
+                errorMessage = durable.ErrorMessage
+            });
+        });
 
     [McpServerTool(Name = "kicad_pcb_drc_cancel"),
      Description("Cancel one exact native PCB DRC job by process epoch, document and canonical lowercase job ID. Returns at once with cancellationRequested; the job reports cancelled only after its worker has stopped, and a cancelled job never carries findings or becomes completed. Read it with kicad_pcb_drc_job until workerFinished. A job that already finished keeps its terminal state."),
@@ -612,10 +815,49 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         processEpoch = ""; document = new(); revision = new(); candidateHash = ""; deleteItemIds = []; return false;
     }
 
-    private static void ForgetCandidateReceiptOnStale(PcbDrcJobState state)
+    private void ForgetCandidateReceiptOnStale(PcbDrcJobState state)
     {
         if (state.Status == PcbDrcJobStatus.PdrcjsStale)
+        {
             CandidateReceipts.TryRemove(state.JobId, out _);
+            if (PcbDrcReceiptRecord.Canonical(state.OperationId))
+            {
+                foreach (var instance in registry.List())
+                {
+                    var durable = receipts.Read(instance.InstanceId, state.OperationId);
+                    if (durable is null || durable.ProcessEpoch != state.ProcessEpoch || durable.JobId != state.JobId)
+                        continue;
+                    receipts.MarkStale(durable.InstanceId, state.OperationId, state.ProcessEpoch, state.JobId,
+                        SchematicJson.Formatter.Format(state), state.ErrorCode, state.ErrorMessage);
+                    break;
+                }
+            }
+        }
+    }
+
+    private static string CanonicalGroupChanges(IReadOnlyList<NativeRouteGroupChange> changes) =>
+        string.Join("\n", changes.Select(change => SchematicJson.Formatter.Format(change)));
+
+    private static void RestoreCandidateReceipt(PcbDrcReceiptRecord receipt, PcbDrcJobState state)
+    {
+        if (receipt.CandidateJson.Length == 0 || receipt.JobId is null || !state.CandidateDryRun)
+            return;
+        try
+        {
+            var candidate = BoardJson.Parser.Parse<CreateItems>(receipt.CandidateJson);
+            var delete = receipt.DeleteJson.Length == 0
+                ? null : BoardJson.Parser.Parse<DeleteItems>(receipt.DeleteJson);
+            CandidateReceipts[state.JobId] = new CandidateReceipt(
+                receipt.ProcessEpoch, state.Document.Clone(), receipt.RevisionJson.Length == 0
+                    ? new() : SchematicJson.Parser.Parse<Protocol.DocumentRevision>(receipt.RevisionJson),
+                receipt.CandidateHash,
+                delete?.ItemIds.Select(item => item.Value).Order(StringComparer.Ordinal).ToArray() ?? []);
+        }
+        catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException
+            or InvalidOperationException)
+        {
+            throw new AutomationException("drc_receipt_corrupt", "The retained PCB DRC candidate is invalid: " + error.Message);
+        }
     }
 
     internal static string CanonicalCandidate(CreateItems candidate)
@@ -737,6 +979,26 @@ public sealed class PcbDrcOperationInput : NativeDocumentInputObject
         return (Document!,
             PcbDrcTypedInputValidation.Identifier(OperationId, "operation", "invalid_pcb_drc_typed_operation"),
             PcbDrcTypedInputValidation.Identifier(ProcessEpoch, "process epoch", "invalid_pcb_drc_typed_operation"));
+    }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbDrcOperationReceiptInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+    private string? operationId;
+    private string? processEpoch;
+
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+    public string? OperationId { get => operationId; set => operationId = BindOnce(value); }
+    public string? ProcessEpoch { get => processEpoch; set => processEpoch = BindOnce(value); }
+
+    internal (NativeDocumentInput Document, string OperationId, string ProcessEpoch) ToPayload()
+    {
+        _ = PcbDrcTypedInputValidation.Document(Document, "invalid_pcb_drc_typed_receipt");
+        return (Document!,
+            PcbDrcTypedInputValidation.Identifier(OperationId, "operation", "invalid_pcb_drc_typed_receipt"),
+            PcbDrcTypedInputValidation.Identifier(ProcessEpoch, "process epoch", "invalid_pcb_drc_typed_receipt"));
     }
 }
 

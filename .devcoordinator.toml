@@ -3199,6 +3199,7 @@ name="pub"
 tier="development"
 command=["python3","automation/qualification/publish-linux-preview.py"]
 [test.preview28-linux-public]
+env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
 timeout_seconds=3600
  
 [[test.preview28-linux-public.check]]

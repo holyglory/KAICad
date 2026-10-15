@@ -407,8 +407,11 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             // item transaction. It remains a separate persistence boundary.
             archivePersisted = sourceArchive.Persisted,
             archiveAtomicWrite = sourceArchive.AtomicWrite,
-            archiveNativeAtomic = compensated,
-            provenanceAtomic = compensated,
+            // The source archive and board mutation are separate persistence
+            // boundaries. A compensating delete contains a mismatch, but it
+            // does not retroactively join the two transactions.
+            archiveNativeAtomic = false,
+            provenanceAtomic = false,
             archiveReadbackVerified = archiveVerified,
             errorCode = compensation.ErrorCode ?? archiveError?.Code ?? (success ? null : outcome.ErrorCode),
             errorMessage = compensation.ErrorMessage ?? archiveError?.Message ?? (success ? null : outcome.ErrorMessage),

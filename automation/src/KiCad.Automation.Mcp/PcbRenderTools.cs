@@ -157,6 +157,8 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                     exactVisiblePixels = coverage.ExactVisiblePixels,
                     occlusionDepth = coverage.OcclusionDepth
                 },
+                capabilityBoundary = PcbRenderCapabilityContract.Describe(
+                    inspection?.Metadata, coverage, inspection is not null),
                 geometryScope = new
                 {
                     objectKind = "shown-footprint-model-instances",
@@ -236,6 +238,56 @@ internal static class PcbRenderObservationContract
     ];
 
     internal static string Status(bool metadataAvailable) => metadataAvailable ? "incomplete" : "unavailable";
+}
+
+internal static class PcbRenderCapabilityContract
+{
+    private const string BoardGeometryLimitation =
+        "The 3D renderer does not project board primitives into this image; inspect the same lifecycle-bound board with kicad_pcb_render_geometry_typed.";
+
+    private const string SecondaryAssetLimitation =
+        "Secondary asset completeness is proven only by the native per-model flag; UV-bearing meshes without dependency identities remain incomplete.";
+
+    internal static object Describe(PcbRenderMetadata? metadata, PcbRenderCoverage coverage,
+        bool metadataAvailable)
+    {
+        string secondaryStatus = !metadataAvailable
+            ? "unavailable"
+            : coverage.SecondaryAssetIdentitiesComplete
+                ? "complete_for_declared_model_rows"
+                : "incomplete";
+
+        string[] secondaryLimitations = metadataAvailable && metadata is not null
+            ? metadata.Models
+                .Select(model => model.SecondaryAssetLimitation)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray()
+            : [];
+
+        if (secondaryLimitations.Length == 0 && secondaryStatus != "complete_for_declared_model_rows")
+            secondaryLimitations = [SecondaryAssetLimitation];
+
+        return new
+        {
+            boardGeometry = new
+            {
+                status = "separate_lifecycle_bound_inspection",
+                tool = "kicad_pcb_render_geometry_typed",
+                lifecycleBound = true,
+                sameRenderProjection = false,
+                exact3dPixels = false,
+                limitation = BoardGeometryLimitation
+            },
+            secondaryModelAssets = new
+            {
+                status = secondaryStatus,
+                perModelRows = metadataAvailable,
+                identitiesAndHashes = metadataAvailable,
+                limitations = secondaryLimitations
+            }
+        };
+    }
 }
 
 internal readonly record struct PcbRenderCoverage(

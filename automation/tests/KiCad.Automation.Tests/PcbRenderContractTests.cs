@@ -2,6 +2,7 @@ using Kiapi.Board.Jobs;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Text.Json;
 
 namespace KiCad.Automation.Tests;
 
@@ -21,6 +22,36 @@ public sealed class PcbRenderContractTests
             "DRC overlays are unavailable; the native inspection does not capture DRC marker geometry or visibility");
         CollectionAssert.Contains(PcbRenderObservationContract.Limitations.ToArray(),
             "projected bounds are conservative and do not prove exact visible pixels or occlusion depth");
+    }
+
+    [TestMethod]
+    public void CapabilityBoundaryReportsSeparateBoardGeometryAndSecondaryAssetProof()
+    {
+        JsonElement unavailable = JsonSerializer.SerializeToElement(
+            PcbRenderCapabilityContract.Describe(null, PcbRenderCoverage.Unavailable, false));
+
+        JsonElement boardGeometry = unavailable.GetProperty("boardGeometry");
+        Assert.AreEqual("separate_lifecycle_bound_inspection", boardGeometry.GetProperty("status").GetString());
+        Assert.AreEqual("kicad_pcb_render_geometry_typed", boardGeometry.GetProperty("tool").GetString());
+        Assert.IsTrue(boardGeometry.GetProperty("lifecycleBound").GetBoolean());
+        Assert.IsFalse(boardGeometry.GetProperty("sameRenderProjection").GetBoolean());
+        Assert.IsFalse(boardGeometry.GetProperty("exact3dPixels").GetBoolean());
+        StringAssert.Contains(boardGeometry.GetProperty("limitation").GetString()!,
+            "does not project board primitives");
+
+        JsonElement secondary = unavailable.GetProperty("secondaryModelAssets");
+        Assert.AreEqual("unavailable", secondary.GetProperty("status").GetString());
+        Assert.IsFalse(secondary.GetProperty("perModelRows").GetBoolean());
+        Assert.IsFalse(secondary.GetProperty("identitiesAndHashes").GetBoolean());
+        Assert.IsTrue(secondary.GetProperty("limitations").GetArrayLength() > 0);
+
+        JsonElement complete = JsonSerializer.SerializeToElement(
+            PcbRenderCapabilityContract.Describe(new PcbRenderMetadata(),
+                new PcbRenderCoverage(true, false, false, false, true, false, false), true));
+        Assert.AreEqual("complete_for_declared_model_rows",
+            complete.GetProperty("secondaryModelAssets").GetProperty("status").GetString());
+        Assert.AreEqual(0,
+            complete.GetProperty("secondaryModelAssets").GetProperty("limitations").GetArrayLength());
     }
 
     [TestMethod]

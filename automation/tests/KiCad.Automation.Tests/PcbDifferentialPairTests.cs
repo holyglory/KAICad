@@ -90,6 +90,70 @@ public sealed class PcbDifferentialPairTests
     }
 
     [TestMethod]
+    public void ValidationSupportsMatchedConnectedMultiSegmentRoutes()
+    {
+        var validation = new PcbDifferentialPairTools.PairValidationRequest
+        {
+            PositiveNet = "USB_D_P", NegativeNet = "USB_D_N", WidthNm = 150_000,
+            MinimumGapNm = 350_000, TargetGapNm = 350_000, MaxSkewNm = 0, ToleranceNm = 0
+        };
+        var items = new[]
+        {
+            Track("00000000-0000-0000-0000-000000000041", "USB_D_P", BoardLayer.BlFCu, 0, 1_000_000),
+            Track("00000000-0000-0000-0000-000000000042", "USB_D_P", BoardLayer.BlFCu, 0, 2_000_000, startX: 1_000_000),
+            Track("00000000-0000-0000-0000-000000000043", "USB_D_N", BoardLayer.BlFCu, 500_000, 1_000_000),
+            Track("00000000-0000-0000-0000-000000000044", "USB_D_N", BoardLayer.BlFCu, 500_000, 2_000_000, startX: 1_000_000)
+        }.Select(Google.Protobuf.WellKnownTypes.Any.Pack);
+
+        var result = PcbDifferentialPairTools.ValidateGeometry(validation, items);
+
+        Assert.IsTrue(result.Compliant);
+        Assert.IsTrue(result.SupportedScope);
+        Assert.AreEqual(2, result.MatchedSegmentCount);
+        Assert.AreEqual(2_000_000d, result.Positive.LengthNm!.Value, 0.001);
+        Assert.AreEqual(2_000_000d, result.Negative.LengthNm!.Value, 0.001);
+        Assert.AreEqual(0d, result.SkewNm!.Value, 0.001);
+        Assert.AreEqual(500_000d, result.CenterlineSpacingNm!.Value, 0.001);
+        Assert.AreEqual(350_000d, result.CopperEdgeGapNm!.Value, 0.001);
+        Assert.AreEqual(2_000_000d, result.LongitudinalOverlapNm!.Value, 0.001);
+        Assert.AreEqual(0d, result.LongitudinalEndpointDeltaNm!.Value, 0.001);
+        Assert.AreEqual(0d, result.MaximumParallelError, 0.000_000_001);
+        Assert.IsEmpty(result.Violations);
+    }
+
+    [TestMethod]
+    public void ValidationReportsWorstMultiSegmentSpacingAndParallelismViolations()
+    {
+        var validation = new PcbDifferentialPairTools.PairValidationRequest
+        {
+            PositiveNet = "USB_D_P", NegativeNet = "USB_D_N", WidthNm = 150_000,
+            MinimumGapNm = 350_000, TargetGapNm = 350_000, MaxSkewNm = 1, ToleranceNm = 0,
+            ParallelTolerance = 1e-9
+        };
+        var items = new[]
+        {
+            Track("00000000-0000-0000-0000-000000000051", "USB_D_P", BoardLayer.BlFCu, 0, 1_000_000),
+            Track("00000000-0000-0000-0000-000000000052", "USB_D_P", BoardLayer.BlFCu, 0, 2_000_000, startX: 1_000_000, endY: 200_000),
+            Track("00000000-0000-0000-0000-000000000053", "USB_D_N", BoardLayer.BlFCu, 500_000, 1_000_000),
+            Track("00000000-0000-0000-0000-000000000054", "USB_D_N", BoardLayer.BlFCu, 500_000, 2_000_000, startX: 1_000_000, endY: 800_000)
+        }.Select(Google.Protobuf.WellKnownTypes.Any.Pack);
+
+        var result = PcbDifferentialPairTools.ValidateGeometry(validation, items);
+        var codes = result.Violations.Select(issue => issue.Code).ToHashSet(StringComparer.Ordinal);
+
+        Assert.IsFalse(result.Compliant);
+        Assert.IsTrue(result.SupportedScope);
+        Assert.AreEqual(2, result.MatchedSegmentCount);
+        Assert.IsTrue(result.CenterlineSpacingNm is > 0 and < 500_000);
+        Assert.IsTrue(result.SkewNm > 1);
+        Assert.IsTrue(result.MaximumParallelError > validation.ParallelTolerance);
+        Assert.IsTrue(codes.Contains("copper_gap_below_minimum"));
+        Assert.IsTrue(codes.Contains("copper_gap_target_mismatch"));
+        Assert.IsTrue(codes.Contains("non_parallel"));
+        Assert.IsTrue(codes.Contains("skew_exceeded"));
+    }
+
+    [TestMethod]
     public void ValidationReportsLayerSpacingAndSkewViolations()
     {
         var validation = new PcbDifferentialPairTools.PairValidationRequest
@@ -168,11 +232,11 @@ public sealed class PcbDifferentialPairTests
     }
 
     private static Track Track(string id, string net, BoardLayer layer, long y, long endX,
-        long widthNm = 150_000, long startX = 0) => new()
+        long widthNm = 150_000, long startX = 0, long? endY = null) => new()
     {
         Id = new() { Value = id },
         Start = new() { XNm = startX, YNm = y },
-        End = new() { XNm = endX, YNm = y },
+        End = new() { XNm = endX, YNm = endY ?? y },
         Width = new() { ValueNm = widthNm },
         Layer = layer,
         Net = new() { Name = net }

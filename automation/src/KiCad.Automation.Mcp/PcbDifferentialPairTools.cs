@@ -116,7 +116,7 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             instanceId, expectedProcessEpoch, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_pcb_diff_pair_validate", ReadOnly = true),
-     Description("Validate one supported straight differential-pair route at one lifecycle checkpoint. requestJson contains positiveNet, negativeNet, widthNm, minimumGapNm, optional targetGapNm, maxSkewNm, toleranceNm, parallelTolerance and netClassName. The validator reports exact straight-segment lengths, skew, copper edge gap, endpoint correspondence, layer agreement and parallelism. Arcs, vias, multi-segment routes and unknown geometry are explicit incomplete results; the tool never mutates the board or claims DRC, impedance or manufacturing validity."),
+     Description("Validate one matched connected straight-track differential-pair route per net at one lifecycle checkpoint. requestJson contains positiveNet, negativeNet, widthNm, minimumGapNm, optional targetGapNm, maxSkewNm, toleranceNm, parallelTolerance and netClassName. The validator reports polyline lengths, skew, copper edge gap, endpoint correspondence, layer agreement and per-segment parallelism. Arcs, vias, disconnected or branched routes, and unknown geometry are explicit incomplete results; the tool never mutates the board or claims DRC, impedance or manufacturing validity."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "explicit PCB lifecycle state, paired native route geometry, spacing/parallelism/skew validation")]
     public Task<CallToolResult> ValidatePair(string instanceId, string documentJson, string expectedStateJson,
         string requestJson, CancellationToken cancellationToken) => Execute(async () =>
@@ -183,7 +183,9 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             instanceId, processEpoch = session.Epoch, document,
             beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
             positiveNet = positive.Name, negativeNet = negative.Name,
-            supportedScope = summary.SupportedScope ? "single_straight_track_per_net" : "unsupported",
+            supportedScope = summary.SupportedScope
+                ? summary.MatchedSegmentCount == 1 ? "single_straight_track_per_net" : "matched_multi_segment_straight_track_route_per_net"
+                : "unsupported",
             validationStatus = summary.SupportedScope ? "complete" : "incomplete",
             widthNm = request.WidthNm, minimumGapNm = request.MinimumGapNm, targetGapNm = request.TargetGapNm,
             requiredMinimumCenterlineSpacingNm = checked(request.WidthNm + request.MinimumGapNm),
@@ -280,6 +282,12 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
     }
     private sealed record PairSegment(string Id, string NetName, string Kind, string Layer, Vector2 Start,
         Vector2 End, long WidthNm, double LengthNm);
+    private sealed record PairRoute(PairSegment[] Segments, Vector2[] Points, double LengthNm,
+        bool Connected, bool SimplePath, bool UniformLayer)
+    {
+        public bool Supported => Segments.Length != 0 && Connected && SimplePath && UniformLayer;
+    }
+    private readonly record struct PointKey(long XNm, long YNm);
 
     internal sealed class Bounds { public long MinXNm { get; set; } public long MinYNm { get; set; } public long MaxXNm { get; set; } public long MaxYNm { get; set; } }
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
@@ -428,73 +436,96 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             }
         }
 
-        PairSegment[] orderedPositive = positive.ToArray();
-        PairSegment[] orderedNegative = negative.ToArray();
+        PairRoute positiveRoute = BuildRoute(positive);
+        PairRoute negativeRoute = BuildRoute(negative);
+        PairSegment[] orderedPositive = positiveRoute.Segments;
+        PairSegment[] orderedNegative = negativeRoute.Segments;
         var issues = new List<PairValidationIssue>();
         if (orderedPositive.Length == 0)
             issues.Add(new("positive_route_missing", "No straight Track geometry was found for the positive differential-pair net."));
         if (orderedNegative.Length == 0)
             issues.Add(new("negative_route_missing", "No straight Track geometry was found for the negative differential-pair net."));
         if (positiveArcs != 0 || negativeArcs != 0)
-            issues.Add(new("arc_not_supported", "Arc geometry is outside the supported single-straight-track validation scope."));
+            issues.Add(new("arc_not_supported", "Arc geometry is outside the supported straight-track route validation scope."));
         if (positiveVias != 0 || negativeVias != 0)
-            issues.Add(new("via_not_supported", "Via geometry is outside the supported single-straight-track validation scope."));
+            issues.Add(new("via_not_supported", "Via geometry is outside the supported straight-track route validation scope."));
         if (unknownItems != 0)
             issues.Add(new("unknown_geometry", $"The native response contained {unknownItems} unsupported or unreadable geometry item(s)."));
-        if (orderedPositive.Length != 1 || orderedNegative.Length != 1)
-            issues.Add(new("single_segment_scope", "Validation supports exactly one straight Track per named net; multi-segment or disconnected paths are incomplete."));
+        if (orderedPositive.Length != 0 && !positiveRoute.Supported)
+            issues.Add(new("single_segment_scope", "The positive straight-track geometry must form one connected, non-branching path on one copper layer."));
+        if (orderedNegative.Length != 0 && !negativeRoute.Supported)
+            issues.Add(new("single_segment_scope", "The negative straight-track geometry must form one connected, non-branching path on one copper layer."));
 
         double positivePartialLength = orderedPositive.Sum(segment => segment.LengthNm);
         double negativePartialLength = orderedNegative.Sum(segment => segment.LengthNm);
-        double? positiveLength = orderedPositive.Length == 1 && positiveArcs == 0 && positiveVias == 0 && unknownItems == 0
-            ? orderedPositive[0].LengthNm : null;
-        double? negativeLength = orderedNegative.Length == 1 && negativeArcs == 0 && negativeVias == 0 && unknownItems == 0
-            ? orderedNegative[0].LengthNm : null;
+        double? positiveLength = positiveRoute.Supported && positiveArcs == 0 && positiveVias == 0 && unknownItems == 0
+            ? positiveRoute.LengthNm : null;
+        double? negativeLength = negativeRoute.Supported && negativeArcs == 0 && negativeVias == 0 && unknownItems == 0
+            ? negativeRoute.LengthNm : null;
         double? skew = positiveLength is { } positiveFull && negativeLength is { } negativeFull
             ? Math.Abs(positiveFull - negativeFull) : null;
         double partialSkew = Math.Abs(positivePartialLength - negativePartialLength);
         if (skew is { } fullSkew && request.MaxSkewNm is { } maxSkew && fullSkew > maxSkew + request.ToleranceNm)
             issues.Add(new("skew_exceeded", $"Measured differential-pair skew {Round(fullSkew)} nm exceeds the requested bound {Round(maxSkew)} nm.", null, null));
 
-        bool supported = orderedPositive.Length == 1 && orderedNegative.Length == 1
+        bool supported = positiveRoute.Supported && negativeRoute.Supported
             && positiveArcs == 0 && negativeArcs == 0 && positiveVias == 0 && negativeVias == 0 && unknownItems == 0;
-        int matched = supported ? 1 : 0;
+        int matched = 0;
         double? centerlineSpacing = null, copperEdgeGap = null, longitudinalOverlap = null, longitudinalEndpointDelta = null;
         double maximumParallelError = 0;
+        if (supported && orderedPositive.Length != orderedNegative.Length)
+        {
+            issues.Add(new("segment_count_mismatch", $"The paired routes contain {orderedPositive.Length} and {orderedNegative.Length} straight Track segments and cannot be matched deterministically."));
+            supported = false;
+        }
         if (supported)
         {
-            PairSegment left = orderedPositive[0], right = orderedNegative[0];
-            if (!string.Equals(left.Layer, right.Layer, StringComparison.Ordinal))
-                issues.Add(new("layer_mismatch", $"The paired tracks use different copper layers ({left.Layer} and {right.Layer}).", left.Id, right.Id));
-            if (Math.Abs((double)left.WidthNm - request.WidthNm) > request.ToleranceNm)
-                issues.Add(new("positive_width_mismatch", $"The positive track width {left.WidthNm} nm differs from requested width {request.WidthNm} nm.", left.Id, null));
-            if (Math.Abs((double)right.WidthNm - request.WidthNm) > request.ToleranceNm)
-                issues.Add(new("negative_width_mismatch", $"The negative track width {right.WidthNm} nm differs from requested width {request.WidthNm} nm.", null, right.Id));
-            if (Math.Abs((double)left.WidthNm - right.WidthNm) > request.ToleranceNm)
-                issues.Add(new("width_mismatch", $"Paired track widths differ by {Round(Math.Abs((double)left.WidthNm - right.WidthNm))} nm.", left.Id, right.Id));
-            if (left.LengthNm <= request.ToleranceNm || right.LengthNm <= request.ToleranceNm)
-                issues.Add(new("zero_length", "Differential-pair geometry contains a zero-length or tolerance-sized track.", left.Id, right.Id));
+            PairRoute orientedNegative = OrientPairRoute(positiveRoute, negativeRoute);
+            matched = orderedPositive.Length;
+            double overlapTotal = 0;
+            double endpointDeltaMaximum = 0;
+            double spacingMinimum = double.PositiveInfinity;
+            double edgeGapMinimum = double.PositiveInfinity;
+            for (int index = 0; index < orderedPositive.Length; index++)
+            {
+                PairSegment left = orderedPositive[index], right = orientedNegative.Segments[index];
+                if (!string.Equals(left.Layer, right.Layer, StringComparison.Ordinal))
+                    issues.Add(new("layer_mismatch", $"Paired tracks use different copper layers ({left.Layer} and {right.Layer}).", left.Id, right.Id));
+                if (Math.Abs((double)left.WidthNm - request.WidthNm) > request.ToleranceNm)
+                    issues.Add(new("positive_width_mismatch", $"The positive track width {left.WidthNm} nm differs from requested width {request.WidthNm} nm.", left.Id, null));
+                if (Math.Abs((double)right.WidthNm - request.WidthNm) > request.ToleranceNm)
+                    issues.Add(new("negative_width_mismatch", $"The negative track width {right.WidthNm} nm differs from requested width {request.WidthNm} nm.", null, right.Id));
+                if (Math.Abs((double)left.WidthNm - right.WidthNm) > request.ToleranceNm)
+                    issues.Add(new("width_mismatch", $"Paired track widths differ by {Round(Math.Abs((double)left.WidthNm - right.WidthNm))} nm.", left.Id, right.Id));
+                if (left.LengthNm <= request.ToleranceNm || right.LengthNm <= request.ToleranceNm)
+                    issues.Add(new("zero_length", "Differential-pair geometry contains a zero-length or tolerance-sized track.", left.Id, right.Id));
 
-            double parallelError = ParallelError(left, right);
-            maximumParallelError = parallelError;
-            if (parallelError > request.ParallelTolerance)
-                issues.Add(new("non_parallel", $"Paired tracks are not parallel within tolerance {request.ParallelTolerance:R}.", left.Id, right.Id));
+                double parallelError = ParallelError(left, right);
+                maximumParallelError = Math.Max(maximumParallelError, parallelError);
+                if (parallelError > request.ParallelTolerance)
+                    issues.Add(new("non_parallel", $"Paired tracks are not parallel within tolerance {request.ParallelTolerance:R}.", left.Id, right.Id));
 
-            (double overlap, double endpointDelta) = LongitudinalCorrespondence(left, right);
-            longitudinalOverlap = overlap;
-            longitudinalEndpointDelta = endpointDelta;
-            if (overlap <= request.ToleranceNm)
-                issues.Add(new("longitudinal_no_overlap", "Paired tracks have no shared longitudinal span and cannot be treated as coupled.", left.Id, right.Id));
-            if (endpointDelta > request.ToleranceNm)
-                issues.Add(new("longitudinal_endpoint_mismatch", $"Paired track endpoints differ longitudinally by {Round(endpointDelta)} nm.", left.Id, right.Id));
+                (double overlap, double endpointDelta) = LongitudinalCorrespondence(left, right);
+                overlapTotal += overlap;
+                endpointDeltaMaximum = Math.Max(endpointDeltaMaximum, endpointDelta);
 
-            double spacing = SegmentDistance(left.Start, left.End, right.Start, right.End);
-            centerlineSpacing = spacing;
-            copperEdgeGap = spacing - ((double)left.WidthNm + right.WidthNm) / 2;
-            if (copperEdgeGap + request.ToleranceNm < request.MinimumGapNm)
-                issues.Add(new("copper_gap_below_minimum", $"Measured copper edge gap {Round(copperEdgeGap.Value)} nm is below the minimum {request.MinimumGapNm} nm.", left.Id, right.Id));
-            if (request.TargetGapNm is { } targetGap && Math.Abs(copperEdgeGap.Value - targetGap) > request.ToleranceNm)
-                issues.Add(new("copper_gap_target_mismatch", $"Measured copper edge gap {Round(copperEdgeGap.Value)} nm differs from target {targetGap} nm.", left.Id, right.Id));
+                double spacing = SegmentDistance(left.Start, left.End, right.Start, right.End);
+                double edgeGap = spacing - ((double)left.WidthNm + right.WidthNm) / 2;
+                spacingMinimum = Math.Min(spacingMinimum, spacing);
+                edgeGapMinimum = Math.Min(edgeGapMinimum, edgeGap);
+                if (edgeGap + request.ToleranceNm < request.MinimumGapNm)
+                    issues.Add(new("copper_gap_below_minimum", $"Measured copper edge gap {Round(edgeGap)} nm is below the minimum {request.MinimumGapNm} nm.", left.Id, right.Id));
+                if (request.TargetGapNm is { } targetGap && Math.Abs(edgeGap - targetGap) > request.ToleranceNm)
+                    issues.Add(new("copper_gap_target_mismatch", $"Measured copper edge gap {Round(edgeGap)} nm differs from target {targetGap} nm.", left.Id, right.Id));
+            }
+            longitudinalOverlap = overlapTotal;
+            longitudinalEndpointDelta = endpointDeltaMaximum;
+            centerlineSpacing = spacingMinimum;
+            copperEdgeGap = edgeGapMinimum;
+            if (overlapTotal <= request.ToleranceNm)
+                issues.Add(new("longitudinal_no_overlap", "Paired tracks have no shared longitudinal span and cannot be treated as coupled.", orderedPositive[0].Id, orientedNegative.Segments[0].Id));
+            if (endpointDeltaMaximum > request.ToleranceNm)
+                issues.Add(new("longitudinal_endpoint_mismatch", $"Paired track endpoints differ longitudinally by {Round(endpointDeltaMaximum)} nm.", orderedPositive[0].Id, orientedNegative.Segments[0].Id));
         }
 
         PairRouteSummary positiveSummary = new(request.PositiveNet, orderedPositive.Length + positiveVias + positiveArcs,
@@ -528,6 +559,124 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
         }
         return null;
     }
+
+    private static PairRoute BuildRoute(IReadOnlyList<PairSegment> source)
+    {
+        PairSegment[] segments = source.OrderBy(segment => segment.Id, StringComparer.Ordinal).ToArray();
+        if (segments.Length == 0)
+            return new(Array.Empty<PairSegment>(), Array.Empty<Vector2>(), 0, false, false, false);
+
+        double length = segments.Sum(segment => segment.LengthNm);
+        var adjacency = new Dictionary<PointKey, List<int>>();
+        for (int index = 0; index < segments.Length; index++)
+        {
+            PairSegment segment = segments[index];
+            if (segment.Start.Equals(segment.End))
+                return new(segments, Array.Empty<Vector2>(), length, false, false, false);
+            AddEndpoint(adjacency, Point(segment.Start), index);
+            AddEndpoint(adjacency, Point(segment.End), index);
+        }
+
+        var visited = new bool[segments.Length];
+        var pending = new Queue<int>();
+        pending.Enqueue(0);
+        int visitedCount = 0;
+        while (pending.Count != 0)
+        {
+            int edgeIndex = pending.Dequeue();
+            if (visited[edgeIndex])
+                continue;
+            visited[edgeIndex] = true;
+            visitedCount++;
+            PairSegment edge = segments[edgeIndex];
+            foreach (PointKey endpoint in new[] { Point(edge.Start), Point(edge.End) })
+            {
+                foreach (int adjacent in adjacency[endpoint])
+                {
+                    if (!visited[adjacent])
+                        pending.Enqueue(adjacent);
+                }
+            }
+        }
+
+        bool connected = visitedCount == segments.Length;
+        bool degreesValid = adjacency.Values.All(edges => edges.Count <= 2);
+        PointKey[] endpoints = adjacency.Where(entry => entry.Value.Count == 1)
+            .Select(entry => entry.Key)
+            .OrderBy(point => point.XNm)
+            .ThenBy(point => point.YNm)
+            .ToArray();
+        bool simplePath = connected && degreesValid && endpoints.Length == 2;
+        if (!simplePath)
+        {
+            bool uniform = segments.Select(segment => segment.Layer).Distinct(StringComparer.Ordinal).Count() == 1;
+            return new(segments, Array.Empty<Vector2>(), length, connected, false, uniform);
+        }
+
+        var ordered = new List<PairSegment>(segments.Length);
+        var points = new List<Vector2>(segments.Length + 1) { FromPoint(endpoints[0]) };
+        var used = new bool[segments.Length];
+        PointKey current = endpoints[0];
+        int previousEdge = -1;
+        while (ordered.Count < segments.Length)
+        {
+            int[] candidates = adjacency[current].Where(index => index != previousEdge && !used[index]).ToArray();
+            if (candidates.Length != 1)
+            {
+                bool uniform = segments.Select(segment => segment.Layer).Distinct(StringComparer.Ordinal).Count() == 1;
+                return new(segments, Array.Empty<Vector2>(), length, connected, false, uniform);
+            }
+
+            int edgeIndex = candidates[0];
+            used[edgeIndex] = true;
+            PairSegment edge = segments[edgeIndex];
+            PairSegment oriented = Point(edge.Start) == current
+                ? edge
+                : edge with { Start = edge.End.Clone(), End = edge.Start.Clone() };
+            ordered.Add(oriented);
+            points.Add(oriented.End.Clone());
+            previousEdge = edgeIndex;
+            current = Point(oriented.End);
+        }
+
+        bool allUsed = used.All(value => value);
+        bool uniformLayer = ordered.Select(segment => segment.Layer).Distinct(StringComparer.Ordinal).Count() == 1;
+        return new(ordered.ToArray(), points.ToArray(), length, connected, allUsed, uniformLayer);
+    }
+
+    private static PairRoute OrientPairRoute(PairRoute reference, PairRoute candidate)
+    {
+        if (candidate.Points.Length < 2 || reference.Points.Length < 2)
+            return candidate;
+        double direct = Distance(reference.Points[0], candidate.Points[0])
+            + Distance(reference.Points[^1], candidate.Points[^1]);
+        double reverse = Distance(reference.Points[0], candidate.Points[^1])
+            + Distance(reference.Points[^1], candidate.Points[0]);
+        return reverse < direct ? ReverseRoute(candidate) : candidate;
+    }
+
+    private static PairRoute ReverseRoute(PairRoute route)
+    {
+        PairSegment[] segments = route.Segments.Reverse()
+            .Select(segment => segment with { Start = segment.End.Clone(), End = segment.Start.Clone() })
+            .ToArray();
+        Vector2[] points = route.Points.Reverse().Select(point => point.Clone()).ToArray();
+        return route with { Segments = segments, Points = points };
+    }
+
+    private static void AddEndpoint(Dictionary<PointKey, List<int>> adjacency, PointKey point, int edgeIndex)
+    {
+        if (!adjacency.TryGetValue(point, out List<int>? edges))
+        {
+            edges = new List<int>();
+            adjacency.Add(point, edges);
+        }
+        edges.Add(edgeIndex);
+    }
+
+    private static PointKey Point(Vector2 point) => new(point.XNm, point.YNm);
+
+    private static Vector2 FromPoint(PointKey point) => new() { XNm = point.XNm, YNm = point.YNm };
 
     private static T Unpack<T>(ProtoAny packed, string kind) where T : class, IMessage<T>, new()
     {

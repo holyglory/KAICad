@@ -26,7 +26,11 @@ on:
         description: With checks_only, select all Mac checks or a focused native fixture
         type: choice
         default: all
-        options: [all, caption, handoff, staging, ui-access, concurrency, registry, instance-errors, sync-publication, integrated-update, integrated-mcp-update]
+        options: [all, caption, handoff, staging, ui-access, concurrency, registry, instance-errors, sync-publication, integrated-update, integrated-mcp-update, retained-package]
+      mac_retained_package:
+        description: Exact retained ARM64 failed-build run/attempt/source commit/archive SHA-256 for retained-package
+        type: string
+        default: '38639617642/1/e40d567a4350591dc991cd670f07adeea55444c5/24f570075d40b52dff3813a0b2e3fcc1982461083441ad9d5bec4fc3271ef295'
       windows_fixture:
         description: With checks_only, use all fixtures or stage the retained 84359 Windows archive (no publication)
         type: choice
@@ -57,6 +61,9 @@ permissions:
 jobs:
   mac:
     if: inputs.target == 'all' || startsWith(inputs.target, 'mac')
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -71,6 +78,7 @@ jobs:
       CHECKS_ONLY: ${{ inputs.checks_only }}
       MAC_UPDATE_BASELINE_COMMIT: ${{ inputs.mac_update_baseline_commit }}
       MAC_UPDATE_CANDIDATE_COMMIT: ${{ inputs.mac_update_candidate_commit }}
+      KICAD_RETAINED_MAC_INPUT: ${{ inputs.mac_retained_package }}
       HOMEBREW_NO_ANALYTICS: '1'
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
@@ -122,6 +130,9 @@ jobs:
           if [ "$CHECKS_ONLY" = true ] && [ "$MAC_FIXTURE" = registry ]; then
             kicad_mac_test_filter='FullyQualifiedName~InstanceReplacementTests|FullyQualifiedName~InstanceUpdateReconnectionTests|FullyQualifiedName~UpdateOriginTests|FullyQualifiedName~InstanceRegistryTests.PlatformLocalLaunchReceiptUsesTheSameEndpointAsNativeStartup'
           fi
+          if [ "$CHECKS_ONLY" = true ] && [ "$MAC_FIXTURE" = retained-package ]; then
+            kicad_mac_test_filter='FullyQualifiedName~MacRetainedPackageInputTests'
+          fi
           if [ "$MAC_FIXTURE" = instance-errors ]; then
             test "$CHECKS_ONLY" = true
             kicad_mac_test_filter='FullyQualifiedName~InstanceToolBoundaryTests|FullyQualifiedName~InstanceRegistryTests|FullyQualifiedName~McpProcessTests'
@@ -155,6 +166,30 @@ jobs:
           dotnet test KiCad.Automation.slnx --configuration Release \
             --filter "$kicad_mac_test_filter" --logger trx \
             --results-directory "$RUNNER_TEMP/kicad-loader-preflight"
+      - name: Requalify the exact retained Mac ARM64 package without rebuilding it
+        if: inputs.checks_only && inputs.mac_fixture == 'retained-package' && matrix.architecture == 'arm64'
+        working-directory: automation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IFS=/ read -r retained_run retained_attempt retained_commit retained_sha <<< "$KICAD_RETAINED_MAC_INPUT"
+          [[ "$retained_run" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$retained_attempt" =~ ^[1-9][0-9]{0,5}$ ]]
+          [[ "$retained_commit" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$retained_sha" =~ ^[0-9a-f]{64}$ ]]
+          retained_root="$RUNNER_TEMP/kicad-retained-mac"
+          gh run download "$retained_run" --repo "${{ github.repository }}" \
+            --name "native-macos-arm64-${retained_commit}-${retained_attempt}" --dir "$retained_root"
+          archive_path="$(find "$retained_root" -type f -name "unqualified-macos-${retained_commit}.tar.gz" -print -quit)"
+          receipt_path="$(find "$retained_root" -type f -path '*/kicad-delivery/receipt.json' -print -quit)"
+          test -n "$archive_path" && test -n "$receipt_path"
+          export KICAD_RETAINED_MAC_ARCHIVE="$archive_path"
+          export KICAD_RETAINED_MAC_RECEIPT="$receipt_path"
+          export KICAD_HOSTED_FIXTURE_EVIDENCE="$RUNNER_TEMP/kicad-loader-preflight/evidence"
+          dotnet test KiCad.Automation.slnx --configuration Release --no-restore \
+            --filter 'TestCategory=NativeMacRetainedPackage' --logger trx \
+            --results-directory "$RUNNER_TEMP/kicad-loader-preflight/retained"
       - name: Prepare official Mac dependencies and validate the candidate
         if: '!inputs.checks_only'
         working-directory: automation

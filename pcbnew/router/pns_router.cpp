@@ -1164,7 +1164,7 @@ void ROUTER::PartitionRoutingChanges( std::vector<ITEM*> aRemoved,
             return nullptr;
 
         BOARD_ITEM* parent = item->Parent();
-        if( !isLive( parent ) )
+        if( !parent || !isLive( parent ) )
             parent = item->GetSourceItem();
         return isLive( parent ) ? parent : nullptr;
     };

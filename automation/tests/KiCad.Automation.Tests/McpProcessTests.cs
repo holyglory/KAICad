@@ -2182,7 +2182,8 @@ public sealed class McpProcessTests
             foreach (string version in new[] { "baseline", "xml", "native" })
                 Assert.AreEqual(JsonValueKind.Object, conflictPlan.GetProperty("conflicts")[0].GetProperty(version).ValueKind);
             var choiceCall = await Request(8, "tools/call", new { name = "kicad_schematic_xml_plan",
-                arguments = new { baselineXml, desiredXml, nativeXml, choices = new Dictionary<string, string> { [noteItem.Id.Value] = "xml" } } });
+                arguments = new { baselineXml, desiredXml, nativeXml, choices = new Dictionary<string, string> { [noteItem.Id.Value] = "xml" },
+                    expectedSnapshotToken = conflictPlan.GetProperty("snapshotToken").GetString() } });
             var choicePlan = choiceCall.GetProperty("result").GetProperty("structuredContent");
             Assert.IsTrue(choicePlan.GetProperty("canPlan").GetBoolean());
             Assert.IsFalse(choicePlan.GetProperty("liveMutationAuthorized").GetBoolean());
@@ -2313,16 +2314,23 @@ public sealed class McpProcessTests
             chainBaseline.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "PATH", NetClass = "Original" });
             var chainDesired = chainBaseline.Clone(); chainDesired.Metadata.NetChains[0].NetClass = "Xml";
             var chainNative = chainBaseline.Clone(); chainNative.Metadata.NetChains[0].NetClass = "Native";
+            var chainConflict = await Request(300, "tools/call", new { name = "kicad_schematic_xml_plan",
+                arguments = new { baselineXml = SchematicDataXml.Write(chainBaseline), desiredXml = SchematicDataXml.Write(chainDesired),
+                    nativeXml = SchematicDataXml.Write(chainNative) } });
+            var chainSnapshotToken = chainConflict.GetProperty("result").GetProperty("structuredContent")
+                .GetProperty("snapshotToken").GetString();
             var chainResolution = await Request(30, "tools/call", new { name = "kicad_schematic_xml_plan",
                 arguments = new { baselineXml = SchematicDataXml.Write(chainBaseline), desiredXml = SchematicDataXml.Write(chainDesired),
-                    nativeXml = SchematicDataXml.Write(chainNative), netChainChoices = new Dictionary<string, string> { ["PATH"] = "xml" } } });
+                    nativeXml = SchematicDataXml.Write(chainNative), netChainChoices = new Dictionary<string, string> { ["PATH"] = "xml" },
+                    expectedSnapshotToken = chainSnapshotToken } });
             var resolvedChainPlan = chainResolution.GetProperty("result").GetProperty("structuredContent");
             Assert.IsTrue(resolvedChainPlan.GetProperty("canPlan").GetBoolean());
             var resolvedChain = (SchematicScreenData)SchematicDataXml.Read(resolvedChainPlan.GetProperty("mergedXml").GetString()!);
             Assert.AreEqual("Xml", resolvedChain.Metadata.NetChains.Single().NetClass);
             var badChainChoice = await Request(31, "tools/call", new { name = "kicad_schematic_xml_plan",
                 arguments = new { baselineXml = SchematicDataXml.Write(chainBaseline), desiredXml = SchematicDataXml.Write(chainDesired),
-                    nativeXml = SchematicDataXml.Write(chainNative), netChainChoices = new Dictionary<string, string> { ["UNKNOWN"] = "xml" } } });
+                    nativeXml = SchematicDataXml.Write(chainNative), netChainChoices = new Dictionary<string, string> { ["UNKNOWN"] = "xml" },
+                    expectedSnapshotToken = chainSnapshotToken } });
             Assert.IsTrue(badChainChoice.GetProperty("result").GetProperty("isError").GetBoolean());
             var unresolvedChain = await Request(32, "tools/call", new { name = "kicad_schematic_xml_plan",
                 arguments = new { baselineXml = SchematicDataXml.Write(chainBaseline), desiredXml = SchematicDataXml.Write(chainDesired),
@@ -2333,9 +2341,15 @@ public sealed class McpProcessTests
             variantBaseline.Metadata.VariantDescriptions.Add("Assembly", "original");
             var variantXml = variantBaseline.Clone(); variantXml.Metadata.VariantDescriptions["Assembly"] = "XML";
             var variantNative = variantBaseline.Clone(); variantNative.Metadata.VariantDescriptions["Assembly"] = "native";
+            var variantConflict = await Request(301, "tools/call", new { name = "kicad_schematic_xml_plan",
+                arguments = new { baselineXml = SchematicDataXml.Write(variantBaseline), desiredXml = SchematicDataXml.Write(variantXml),
+                    nativeXml = SchematicDataXml.Write(variantNative) } });
+            var variantSnapshotToken = variantConflict.GetProperty("result").GetProperty("structuredContent")
+                .GetProperty("snapshotToken").GetString();
             var chosenVariant = await Request(33, "tools/call", new { name = "kicad_schematic_xml_plan",
                 arguments = new { baselineXml = SchematicDataXml.Write(variantBaseline), desiredXml = SchematicDataXml.Write(variantXml),
-                    nativeXml = SchematicDataXml.Write(variantNative), variantChoices = new Dictionary<string, string> { ["Assembly"] = "xml" } } });
+                    nativeXml = SchematicDataXml.Write(variantNative), variantChoices = new Dictionary<string, string> { ["Assembly"] = "xml" },
+                    expectedSnapshotToken = variantSnapshotToken } });
             var variantPlan = chosenVariant.GetProperty("result").GetProperty("structuredContent");
             Assert.IsTrue(variantPlan.GetProperty("canPlan").GetBoolean());
             Assert.IsFalse(variantPlan.GetProperty("liveMutationAuthorized").GetBoolean());
@@ -2343,11 +2357,13 @@ public sealed class McpProcessTests
                 .Metadata.VariantDescriptions["Assembly"]);
             var wrongVariant = await Request(34, "tools/call", new { name = "kicad_schematic_xml_plan",
                 arguments = new { baselineXml = SchematicDataXml.Write(variantBaseline), desiredXml = SchematicDataXml.Write(variantXml),
-                    nativeXml = SchematicDataXml.Write(variantNative), variantChoices = new Dictionary<string, string> { ["assembly"] = "xml" } } });
+                    nativeXml = SchematicDataXml.Write(variantNative), variantChoices = new Dictionary<string, string> { ["assembly"] = "xml" },
+                    expectedSnapshotToken = variantSnapshotToken } });
             Assert.IsTrue(wrongVariant.GetProperty("result").GetProperty("isError").GetBoolean());
             var recoveredVariant = await Request(35, "tools/call", new { name = "kicad_schematic_xml_plan",
                 arguments = new { baselineXml = SchematicDataXml.Write(variantBaseline), desiredXml = SchematicDataXml.Write(variantXml),
-                    nativeXml = SchematicDataXml.Write(variantNative), variantChoices = new Dictionary<string, string> { ["Assembly"] = "native" } } });
+                    nativeXml = SchematicDataXml.Write(variantNative), variantChoices = new Dictionary<string, string> { ["Assembly"] = "native" },
+                    expectedSnapshotToken = variantSnapshotToken } });
             Assert.AreEqual(0, recoveredVariant.GetProperty("result").GetProperty("structuredContent").GetProperty("operations").GetArrayLength());
 
             CollectionAssert.Contains(names, "kicad_instance_pending_launches");

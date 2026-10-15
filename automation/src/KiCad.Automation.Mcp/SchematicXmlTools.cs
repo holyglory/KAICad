@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
@@ -116,20 +117,31 @@ public sealed class SchematicXmlTools
     }
 
     [McpServerTool(Name = "kicad_schematic_xml_plan", ReadOnly = true),
-     Description("Compare supplied baseline, desired and observed native typed schematic XML for the same explicit sheet. Plans supported item changes without reading files or touching an editor. Returns merged XML, native operations or all competing versions. Optional choices map conflicted object UUIDs to xml, native or baseline; netChainChoices maps exact conflicted net-chain names to the same choices. Choices apply only to these supplied snapshots; this is not live conflict resolution, complete hierarchy generation or safe mutation admission. Settings, hierarchy/group changes and unknown objects may be unsupported.")]
+     Description("Compare supplied baseline, desired and observed native typed schematic XML for the same explicit sheet. Plans supported item changes without reading files or touching an editor. Returns merged XML, native operations or all competing versions, plus a snapshotToken binding any later choice to these exact snapshots. Optional choices map conflicted object UUIDs to xml, native or baseline; netChainChoices maps exact conflicted net-chain names to the same choices; variantChoices and cacheChoices bind the corresponding project records. When any choice map is supplied, expectedSnapshotToken is required and must match the returned token, otherwise the choice is refused as stale. Choices apply only to these supplied snapshots; this is not live conflict resolution, complete hierarchy generation or safe mutation admission. Settings, hierarchy/group changes and unknown objects may be unsupported.")]
     public CallToolResult Plan(string baselineXml, string desiredXml, string nativeXml,
         CancellationToken cancellationToken, Dictionary<string, string>? choices = null,
         Dictionary<string, string>? netChainChoices = null,
         [Description("Map exact conflicting project variant names to xml, native or baseline. Choices refer only to the supplied snapshots.")]
         Dictionary<string, string>? variantChoices = null,
         [Description("Map exact conflicting cache-definition keys to xml, native or baseline. Choices refer only to the supplied snapshots.")]
-        Dictionary<string, string>? cacheChoices = null)
+        Dictionary<string, string>? cacheChoices = null,
+        [Description("The snapshotToken returned for these exact baseline, desired and native snapshots. Required whenever any choice map is supplied.")]
+        string? expectedSnapshotToken = null)
     {
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             var baseline = Screen(baselineXml); var desired = Screen(desiredXml); var native = Screen(nativeXml);
             cancellationToken.ThrowIfCancellationRequested();
+            string snapshotToken = SnapshotToken(baseline, desired, native);
+            bool hasChoices = choices is not null || netChainChoices is not null || variantChoices is not null || cacheChoices is not null;
+            if (hasChoices)
+            {
+                if (string.IsNullOrWhiteSpace(expectedSnapshotToken))
+                    throw new AutomationException("missing_sync_snapshot_token", "Supply the snapshotToken returned with these conflicts before choosing a version.");
+                if (!string.Equals(expectedSnapshotToken, snapshotToken, StringComparison.Ordinal))
+                    throw new AutomationException("stale_sync_snapshot", "The supplied conflict choice belongs to different XML snapshots; replan and choose again.");
+            }
             var selected = new Dictionary<Guid, SchematicConflictChoice>();
             foreach (var (key, value) in choices ?? [])
             {
@@ -178,7 +190,7 @@ public sealed class SchematicXmlTools
             cancellationToken.ThrowIfCancellationRequested();
             var structured = JsonSerializer.SerializeToElement(new
             {
-                canPlan = plan.CanApply, liveMutationAuthorized = false,
+                canPlan = plan.CanApply, snapshotToken, liveMutationAuthorized = false,
                 mergedXml = plan.Merged is null ? null : SchematicDataXml.Write(plan.Merged),
                 operations = plan.NativeOperations.Select(o => JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(o))).ToArray(),
                 conflicts = plan.Conflicts.Select(c => new
@@ -201,4 +213,16 @@ public sealed class SchematicXmlTools
 
     private static SchematicScreenData Screen(string xml) => SchematicDataXml.Read(xml) as SchematicScreenData
         ?? throw new AutomationException("invalid_schematic_xml", "Expected typed schematic screen XML with an explicit sheet target.");
+
+    private static string SnapshotToken(SchematicScreenData baseline, SchematicScreenData desired, SchematicScreenData native)
+    {
+        // Hash canonical typed XML in a length-delimited JSON array so a choice is
+        // bound to all three snapshots without ambiguity from separators or input
+        // formatting. This token is a planning checkpoint, not native revision proof.
+        byte[] canonical = JsonSerializer.SerializeToUtf8Bytes(new[]
+        {
+            SchematicDataXml.Write(baseline), SchematicDataXml.Write(desired), SchematicDataXml.Write(native)
+        });
+        return Convert.ToHexStringLower(SHA256.HashData(canonical));
+    }
 }

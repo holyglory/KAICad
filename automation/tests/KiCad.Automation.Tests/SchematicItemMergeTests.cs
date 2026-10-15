@@ -86,9 +86,18 @@ public sealed class SchematicItemMergeTests
         var toolConflict = tools.Plan(SchematicDataXml.Write(baseline), SchematicDataXml.Write(xml),
             SchematicDataXml.Write(native), CancellationToken.None);
         Assert.AreEqual("Lib:One", toolConflict.StructuredContent!.Value.GetProperty("conflicts")[0].GetProperty("cacheKey").GetString());
-        var toolResolved = tools.Plan(SchematicDataXml.Write(baseline), SchematicDataXml.Write(xml),
+        string snapshotToken = toolConflict.StructuredContent.Value.GetProperty("snapshotToken").GetString()!;
+        var missingToken = tools.Plan(SchematicDataXml.Write(baseline), SchematicDataXml.Write(xml),
             SchematicDataXml.Write(native), CancellationToken.None,
             cacheChoices: new Dictionary<string, string> { ["Lib:One"] = "xml" });
+        Assert.IsTrue(missingToken.IsError ?? false);
+        var staleToken = tools.Plan(SchematicDataXml.Write(baseline), SchematicDataXml.Write(xml),
+            SchematicDataXml.Write(native), CancellationToken.None,
+            cacheChoices: new Dictionary<string, string> { ["Lib:One"] = "xml" }, expectedSnapshotToken: "stale");
+        Assert.IsTrue(staleToken.IsError ?? false);
+        var toolResolved = tools.Plan(SchematicDataXml.Write(baseline), SchematicDataXml.Write(xml),
+            SchematicDataXml.Write(native), CancellationToken.None,
+            cacheChoices: new Dictionary<string, string> { ["Lib:One"] = "xml" }, expectedSnapshotToken: snapshotToken);
         Assert.IsTrue(toolResolved.StructuredContent!.Value.GetProperty("canPlan").GetBoolean());
         Assert.IsFalse(toolResolved.StructuredContent.Value.GetProperty("liveMutationAuthorized").GetBoolean());
         foreach (var choice in System.Enum.GetValues<SchematicConflictChoice>())

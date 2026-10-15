@@ -102,6 +102,22 @@ public sealed class CapabilityCatalogTests
         }
     }
 
+    [TestMethod]
+    public void PlatformLimitationNamesOpenUpdaterQualificationBoundaries()
+    {
+        var limitation = CapabilityCatalog.Limitations(Array.Empty<ServiceToolCapability>())
+            .Single(entry => entry.Id == "platform-qualification");
+
+        StringAssert.Contains(limitation.Summary, "signed external-package Update-button behavior");
+        StringAssert.Contains(limitation.Summary, "real Windows interrupted-start local-endpoint journey");
+        StringAssert.Contains(limitation.Summary, "older Windows previews after shared-file contention");
+        CollectionAssert.IsSubsetOf(new[]
+        {
+            "p2e4103cde445d5aa", "pf730ac19253000e4", "p03cd301af189077f"
+        }, limitation.TrackedBy.ToArray());
+        Assert.AreEqual("platform-specific", limitation.Availability);
+    }
+
     // The public runbook automation/docs/codex-runtime-refresh.md tells a person which tools to call after pointing
     // Codex or Claude Code at a new preview's server, and which handshake identity to expect. A real SDK MCP client, in
     // the role those clients play, starts the compiled server: every tool the page names must be one the server lists,

@@ -3208,3 +3208,37 @@ after=["osx-x64"]
 timeout_seconds=1200
 command=["python3","automation/qualification/observe-platform-delivery.py","--platform","win-x64","--commit","e7aacb7d19d03b06169bb2eff0bf47f020c4f058","--evidence","automation/artifacts/platform-delivery-evidence/win-x64","--check","win-x64"]
 retained_artifacts=[{name="delivery-evidence",path="automation/artifacts/platform-delivery-evidence/win-x64",max_bytes=536870912}]
+
+# Linux preview 28 publication is deliberately split from package preparation.
+# The package graph produces the immutable candidate first. These checks derive
+# commit, version and archive hashes from that external candidate and write all
+# signed feeds, catalogues and requests outside the checkout. No unstable source
+# identity is copied into this configuration.
+[test.preview28-linux-publish]
+timeout_seconds=1800
+env={TMPDIR="/mnt/build-storage/codex/kicad/t",KICAD_PUBLIC_CANDIDATE_ROOT="/mnt/build-storage/codex/kicad/public-candidates",KICAD_PREVIEW_SEQUENCE="28",KICAD_PREVIEW_REQUEST="/mnt/build-storage/codex/kicad/delivery/preview28/request.json",KICAD_PREVIEW_WORK_ROOT="/mnt/build-storage/codex/kicad/delivery/preview28",KICAD_PREVIEW_PUBLISH_EVIDENCE="automation/artifacts/preview28-publish",KICAD_PREVIOUS_PUBLIC_ROOT="/mnt/build-storage/codex/kicad/public-candidates/win-e40-full-signed-000012",KICAD_PUBLISHER_PRIVATE="/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8",KICAD_PUBLISHER_PUBLIC="/home/holyglory/kicad/automation/distribution/preview-publisher.spki",KICAD_PUBLIC_DOWNLOAD_URL="https://kicad.vr.ae/",KICAD_DELIVERY_DEPLOYMENT="d30d9eeb63ffeccbc",KICAD_COORDINATOR_EXECUTOR="/home/DevCoordinator2/target/release/devcoordinator2-executor"}
+[[test.preview28-linux-publish.check]]
+name="publish"
+tier="pre-merge"
+command=["python3","automation/qualification/publish-linux-preview.py"]
+retained_artifacts=[{name="publish-request",path="automation/artifacts/preview28-publish",max_bytes=16777216}]
+
+[test.preview28-linux-public]
+timeout_seconds=3600
+env={TMPDIR="/mnt/build-storage/codex/kicad/t",KICAD_PREVIEW_REQUEST="/mnt/build-storage/codex/kicad/delivery/preview28/request.json",KICAD_DELIVERY_EVIDENCE="automation/artifacts/preview28-linux-delivery",KICAD_COORDINATOR_EXECUTOR="/home/DevCoordinator2/target/release/devcoordinator2-executor"}
+[[test.preview28-linux-public.check]]
+name="public-and-updater"
+tier="pre-merge"
+command=["python3","automation/qualification/run-linux-preview-public.py"]
+retained_artifacts=[{name="public-and-updater-tests",path="automation/artifacts/preview28-linux-delivery",max_bytes=536870912}]
+[[test.preview28-linux-public.check]]
+name="observe"
+tier="pre-merge"
+requires=["public-and-updater"]
+command=["python3","automation/qualification/observe-linux-preview.py"]
+retained_artifacts=[{name="completion-and-verification",path="automation/artifacts/preview28-linux-delivery",max_bytes=268435456}]
+[[test.preview28-linux-public.check]]
+name="inventory"
+tier="pre-merge"
+requires=["observe"]
+command=["python3","-c","import json, subprocess; receipt=json.loads(subprocess.check_output(['devcoordinator2','completion','check','--file','automation/artifacts/preview28-linux-delivery/completion.json'], text=True)); print(json.dumps(receipt)); assert receipt.get('ok') and receipt.get('data', {}).get('valid'), 'Completion inventory rejected'"]

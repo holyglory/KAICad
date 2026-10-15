@@ -178,6 +178,41 @@ public sealed class PcbDrcToolTests
                 Assert.IsTrue((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
                     transport.Session.Epoch, default)).IsError, $"Invalid native state variant {variant} was accepted");
             }
+
+            // A dependency notification or checkpoint can invalidate a completed
+            // receipt for several distinct native reasons. Preserve the reason as
+            // a stale terminal state, while refusing arbitrary worker failures or
+            // a completed state that still claims cancellation/freshness.
+            foreach (string code in new[]
+            {
+                "document_changed", "project_inputs_changed", "library_inputs_changed",
+                "auxiliary_inputs_changed", "schematic_changed", "input_events_lost"
+            })
+            {
+                transport.State = valid.Clone();
+                transport.State.Status = (PcbDrcJobStatus)6;
+                transport.State.ResultsFresh = false;
+                transport.State.CancellationRequested = true;
+                transport.State.ErrorCode = code;
+                transport.State.ErrorMessage = "The captured DRC dependency changed.";
+                Assert.IsFalse((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
+                    transport.Session.Epoch, default)).IsError ?? false,
+                    $"Native dependency invalidation '{code}' must remain readable as stale.");
+            }
+            transport.State = valid.Clone();
+            transport.State.Status = (PcbDrcJobStatus)6;
+            transport.State.ResultsFresh = false;
+            transport.State.CancellationRequested = true;
+            transport.State.ErrorCode = "native_exception";
+            transport.State.ErrorMessage = "The worker failed.";
+            Assert.IsTrue((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
+                transport.Session.Epoch, default)).IsError ?? false,
+                "A worker failure must not be relabeled as dependency-stale.");
+            transport.State = valid.Clone();
+            transport.State.CancellationRequested = true;
+            Assert.IsTrue((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
+                transport.Session.Epoch, default)).IsError ?? false,
+                "A completed result cannot claim both cancellation and freshness.");
             transport.State = valid.Clone();
             transport.State.SnapshotComplete = false; transport.State.ResultsFresh = false;
             transport.State.InputWarnings.Add("snapshot_incomplete: generated_item_identity: 1 finding names an object that exists only inside this check.");

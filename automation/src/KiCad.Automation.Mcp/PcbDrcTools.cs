@@ -494,6 +494,19 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         && id != Guid.Empty
         && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
 
+    // Native invalidation is deliberately a closed contract. A stale receipt
+    // means that a captured dependency changed (or that its notification stream
+    // was lost); arbitrary worker failures must remain failed/incomplete so a
+    // caller can distinguish an obsolete result from a check that simply did not
+    // finish.
+    private static bool IsDependencyInvalidationCode(string? code) => code is
+        "document_changed" or
+        "project_inputs_changed" or
+        "library_inputs_changed" or
+        "auxiliary_inputs_changed" or
+        "schematic_changed" or
+        "input_events_lost";
+
     private static CallToolResult TypedError(AutomationException error)
     {
         JsonElement structured = JsonSerializer.SerializeToElement(new { errorCode = error.Code, errorMessage = error.Message });
@@ -528,6 +541,12 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 || state.AfterGroupStates.Count != state.VerifiedGroupChanges.Count))
             || ((int)state.Status == 4 && !state.CancellationRequested)
             || ((int)state.Status == 6 && !state.CancellationRequested)
+            // A dependency invalidation requests cancellation, but a completed
+            // result may never claim both cancellation and freshness. Once the
+            // worker quiesces, the only terminal state for that request is STALE
+            // with one of the native dependency reasons above.
+            || (state.CancellationRequested && (state.ResultsFresh || (int)state.Status is 3 or 5 or 7))
+            || ((int)state.Status == 6 && !IsDependencyInvalidationCode(state.ErrorCode))
             || ((int)state.Status is 5 or 6 or 7
                 && (string.IsNullOrWhiteSpace(state.ErrorCode) || string.IsNullOrWhiteSpace(state.ErrorMessage)))
             || state.Findings.Any(finding => !CanonicalUuid(finding.NativeId)

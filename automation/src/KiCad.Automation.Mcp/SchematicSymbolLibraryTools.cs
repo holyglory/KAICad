@@ -119,8 +119,8 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
     });
 
     [McpServerTool(Name = "kicad_symbol_library_checked_receipt", ReadOnly = true),
-     Description("Read one exact process-owned checked direct-symbol-file receipt after a lost reply or MCP reconnect. The original request, document, process epoch and operation fingerprint must match; lookup never retries or dispatches a writer."),
-     KiCadCapability("symbol-library", "checked-native-direct-symbol-file", "exact checked request, process-owned receipt, revision and rollback evidence"),
+     Description("Read one exact checked direct-symbol-file receipt after a lost reply or MCP reconnect. The request is matched against the durable MCP journal and, when available, the native process receipt; lookup never retries or dispatches a writer."),
+     KiCadCapability("symbol-library", "checked-native-direct-symbol-file", "exact checked request, durable MCP receipt, native revision and rollback evidence"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
     public Task<CallToolResult> CheckedReceipt(string instanceId, string expectedProcessEpoch,
         string documentJson, string operationId, string expectedRequestJson,
@@ -135,25 +135,73 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
         if (!expectedRequest.Document.Equals(document) || expectedRequest.ProcessEpoch != expectedProcessEpoch
             || expectedRequest.OperationId != operationId)
             throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
-        NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
-        NativeCapabilitySymbolLibraryCheckedReadOperationResponse response = await client.InvokeAsync<
-            NativeCapabilitySymbolLibraryCheckedReadOperation, NativeCapabilitySymbolLibraryCheckedReadOperationResponse>(new()
+        var receiptStore = new SymbolLibraryCheckedReceiptStore(registry.StateDirectory);
+        SymbolLibraryCheckedReceiptRecord? durableBeforeNative = receiptStore.ReadBound(instanceId, expectedRequest);
+        NativeCapabilitySymbolLibraryCheckedReadOperationResponse? nativeResponse = null;
+        try
+        {
+            NativeClient client = registry.Client(instanceId);
+            AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
+            nativeResponse = await client.InvokeAsync<
+                NativeCapabilitySymbolLibraryCheckedReadOperation, NativeCapabilitySymbolLibraryCheckedReadOperationResponse>(new()
+                {
+                    Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
+                    ExpectedRequest = expectedRequest
+                }, cancellationToken);
+            if (nativeResponse.Found)
             {
-                Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
-                ExpectedRequest = expectedRequest
-            }, cancellationToken);
-        if (response.Found)
-            SymbolLibraryCheckedContract.ValidateResponse(response.Receipt, expectedRequest);
+                SymbolLibraryCheckedContract.ValidateResponse(nativeResponse.Receipt, expectedRequest);
+                // A live native read is authoritative, but an existing durable
+                // terminal record is immutable and remains the reconnect proof.
+                if (durableBeforeNative?.Outcome != SymbolLibraryCheckedReceiptRecord.Terminal)
+                    receiptStore.WriteTerminal(instanceId, expectedRequest, nativeResponse.Receipt);
+                return Data(new
+                {
+                    instanceId, processEpoch = expectedProcessEpoch, operationId, found = true,
+                    receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeResponse.Receipt)),
+                    nativeReceiptAvailable = true, durableRecovery = false, retryDispatched = false
+                });
+            }
+        }
+        catch (NngException) { }
+
+        SymbolLibraryCheckedReceiptRecord? durable = receiptStore.Read(instanceId, operationId);
+        if (durable is not null)
+        {
+            NativeCapabilitySymbolLibraryCheckedWrite storedRequest =
+                SymbolLibraryCheckedReceiptStore.ParseRequest(durable);
+            if (!storedRequest.Equals(expectedRequest))
+                throw new AutomationException("operation_id_conflict", "The operation ID is already bound to another checked symbol request.");
+            if (durable.Outcome == SymbolLibraryCheckedReceiptRecord.Terminal)
+            {
+                NativeCapabilitySymbolLibraryCheckedWriteResponse storedResponse =
+                    SymbolLibraryCheckedReceiptStore.ParseResponse(durable.ResponseJson);
+                SymbolLibraryCheckedContract.ValidateResponse(storedResponse, expectedRequest);
+                return Data(new
+                {
+                    instanceId, processEpoch = expectedProcessEpoch, operationId, found = true,
+                    receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(storedResponse)),
+                    nativeReceiptAvailable = false, durableRecovery = true, retryDispatched = false
+                });
+            }
+
+            throw new AutomationException("operation_outcome_unknown",
+                durable.ErrorMessage.Length == 0
+                    ? "The checked symbol write has no terminal receipt; inspect the native library before retrying."
+                    : durable.ErrorMessage);
+        }
+
         return Data(new
         {
             instanceId,
-            processEpoch = session.Epoch,
+            processEpoch = expectedProcessEpoch,
             operationId,
-            found = response.Found,
-            receipt = response.Found
-                ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Receipt))
+            found = nativeResponse?.Found == true,
+            receipt = nativeResponse?.Found == true
+                ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeResponse.Receipt))
                 : (JsonElement?)null,
-            nativeReceiptAvailable = response.Found,
+            nativeReceiptAvailable = false,
+            durableRecovery = false,
             retryDispatched = false
         });
     });
@@ -234,7 +282,7 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
     });
 
     [McpServerTool(Name = "kicad_symbol_library_write_checked", ReadOnly = false),
-     Description("Checked direct-file symbol-library write. Pass the exact checkedStateJson returned by kicad_library_snapshot_read together with its state digest. The native owner admits only an existing direct KiCad .kicad_sym file, holds one complete dependency lock through save/readback/rollback, verifies the target and unrelated entries, and retains the exact receipt for replay after a lost reply. Legacy, folder, database, HTTP and incomplete providers return an honest refusal without reaching a writer."),
+     Description("Checked direct-file symbol-library write. Pass the exact checkedStateJson returned by kicad_library_snapshot_read together with its state digest. The native owner admits only an existing direct KiCad .kicad_sym file, holds one complete dependency lock through save/readback/rollback, verifies the target and unrelated entries, and the MCP journal retains the exact receipt for replay after a lost reply or MCP replacement. Legacy, folder, database, HTTP and incomplete providers return an honest refusal without reaching a writer."),
      KiCadCapability("symbol-library", "checked-native-direct-symbol-file", "project-bound symbol document, process epoch, complete checked state/revision, operation UUID, definition and typed receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> WriteChecked(string instanceId, string expectedProcessEpoch, string documentJson,
@@ -271,23 +319,110 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
             throw new AutomationException("invalid_library_snapshot", "expectedStateJson is required for checked direct-file mutation.");
         if (!string.Equals(expectedState.StateSha256, expectedSnapshotSha256, StringComparison.Ordinal))
             throw new AutomationException("stale_library_state", "expectedSnapshotSha256 must match the complete checked state digest.");
-        NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
-        NativeCapabilitySymbolLibraryCheckedWriteResponse response = await client.InvokeAsync<
-            NativeCapabilitySymbolLibraryCheckedWrite, NativeCapabilitySymbolLibraryCheckedWriteResponse>(new()
-            {
-                Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
-                ExpectedSnapshotSha256 = expectedSnapshotSha256, Definition = definition,
-                Overwrite = overwrite, PinDisplay = display, ExpectedState = expectedState
-            }, cancellationToken);
         var expectedRequest = new NativeCapabilitySymbolLibraryCheckedWrite
         {
-            Document = document.Clone(), ProcessEpoch = session.Epoch, OperationId = operationId,
+            Document = document.Clone(), ProcessEpoch = expectedProcessEpoch, OperationId = operationId,
             ExpectedSnapshotSha256 = expectedSnapshotSha256, Definition = definition.Clone(),
             Overwrite = overwrite, ExpectedState = expectedState.Clone()
         };
         if (display is not null)
             expectedRequest.PinDisplay = display.Clone();
-        SymbolLibraryCheckedContract.ValidateResponse(response, expectedRequest);
+
+        // Persist the exact admission before contacting KiCad. A replacement
+        // MCP process must never redispatch an operation whose native outcome
+        // may already exist.
+        var receiptStore = new SymbolLibraryCheckedReceiptStore(registry.StateDirectory);
+        var reservation = receiptStore.Reserve(instanceId, expectedRequest);
+        if (!reservation.Created)
+        {
+            if (reservation.Receipt.Outcome == SymbolLibraryCheckedReceiptRecord.Terminal)
+            {
+                NativeCapabilitySymbolLibraryCheckedWriteResponse replay =
+                    SymbolLibraryCheckedReceiptStore.ParseResponse(reservation.Receipt.ResponseJson);
+                replay.Replayed = true;
+                SymbolLibraryCheckedContract.ValidateResponse(replay, expectedRequest);
+                return Data(new
+                {
+                    instanceId, processEpoch = expectedProcessEpoch, document, operationId,
+                    status = replay.Status, committed = replay.Committed, replayed = true,
+                    rollbackCompleted = replay.RollbackCompleted, revisionTracked = replay.RevisionTracked,
+                    completeLifecycle = replay.CompleteLifecycle, beforeSnapshotSha256 = replay.BeforeSnapshotSha256,
+                    afterSnapshotSha256 = replay.AfterSnapshotSha256, errorCode = replay.ErrorCode,
+                    errorMessage = replay.ErrorMessage, nativeReceiptAvailable = false,
+                    receiptVerified = true, persistenceVerified = replay.Committed,
+                    requestFingerprintSha256 = replay.RequestFingerprintSha256,
+                    expectedRequestVerified = replay.ExpectedRequestVerified,
+                    nativeWriteStarted = replay.NativeWriteStarted, postverified = replay.Postverified,
+                    targetVerified = replay.TargetVerified, unrelatedEntriesVerified = replay.UnrelatedEntriesVerified,
+                    rollbackAttempted = replay.RollbackAttempted,
+                    receiptStatus = replay.ReceiptStatus.ToString(), scope = replay.Scope,
+                    beforeRevision = replay.ObservedBefore?.Revision, afterRevision = replay.ObservedAfter?.Revision,
+                    rollbackRevision = replay.ObservedRollback?.Revision,
+                    persistenceSource = replay.Committed ? "durable-symbol-library-receipt" : null,
+                    durableRecovery = true,
+                    transportRetrySafe = true
+                }, !replay.Committed || !string.IsNullOrEmpty(replay.ErrorCode));
+            }
+
+            throw new AutomationException("operation_outcome_unknown",
+                reservation.Receipt.Outcome == SymbolLibraryCheckedReceiptRecord.Unknown
+                    ? "The checked symbol write was delivered previously but its native result is unresolved; inspect the library before starting a new operation."
+                    : "Another MCP process has admitted this checked symbol write; reconcile its outcome before retrying.");
+        }
+
+        NativeClient client;
+        AutomationSession session;
+        try
+        {
+            client = registry.Client(instanceId);
+            session = await Handshake(client, expectedProcessEpoch, cancellationToken);
+        }
+        catch
+        {
+            // No native mutation has been submitted before the handshake;
+            // release only this still-admitted reservation.
+            try { receiptStore.RemoveAdmission(instanceId, expectedRequest); }
+            catch (AutomationException) { }
+            throw;
+        }
+
+        NativeCapabilitySymbolLibraryCheckedWriteResponse response;
+        try
+        {
+            response = await client.InvokeAsync<
+                NativeCapabilitySymbolLibraryCheckedWrite, NativeCapabilitySymbolLibraryCheckedWriteResponse>(expectedRequest, cancellationToken);
+            SymbolLibraryCheckedContract.ValidateResponse(response, expectedRequest);
+            receiptStore.WriteTerminal(instanceId, expectedRequest, response);
+        }
+        catch (NngException error)
+        {
+            if (error.RequestDelivered)
+            {
+                receiptStore.WriteUnknown(instanceId, expectedRequest, "operation_outcome_unknown",
+                    $"KiCad received checked symbol write {operationId} but did not answer; inspect the library before retrying.");
+            }
+            else
+            {
+                receiptStore.RemoveAdmission(instanceId, expectedRequest);
+            }
+            throw new AutomationException(error.RequestDelivered ? "operation_outcome_unknown" : "native_not_reached",
+                error.RequestDelivered
+                    ? $"KiCad received checked symbol write {operationId} but did not answer; inspect the library before retrying."
+                    : $"KiCad did not receive checked symbol write {operationId}; inspect the instance before retrying.");
+        }
+        catch (OperationCanceledException)
+        {
+            receiptStore.WriteUnknown(instanceId, expectedRequest, "operation_outcome_unknown",
+                $"Checked symbol write {operationId} was cancelled after admission; inspect the library before retrying.");
+            throw new AutomationException("operation_outcome_unknown",
+                $"Checked symbol write {operationId} was cancelled after admission; inspect the library before retrying.");
+        }
+        catch (AutomationException error)
+        {
+            receiptStore.WriteUnknown(instanceId, expectedRequest, "invalid_native_receipt",
+                $"The checked symbol write returned an untrusted native result: {error.Message}");
+            throw;
+        }
         var data = new
         {
             instanceId, processEpoch = session.Epoch, document, operationId,
@@ -296,6 +431,7 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
             completeLifecycle = response.CompleteLifecycle, beforeSnapshotSha256 = response.BeforeSnapshotSha256,
             afterSnapshotSha256 = response.AfterSnapshotSha256, errorCode = response.ErrorCode,
             errorMessage = response.ErrorMessage, nativeReceiptAvailable = true,
+            durableRecovery = false,
             receiptVerified = true, persistenceVerified = response.Committed,
             requestFingerprintSha256 = response.RequestFingerprintSha256,
             expectedRequestVerified = response.ExpectedRequestVerified,

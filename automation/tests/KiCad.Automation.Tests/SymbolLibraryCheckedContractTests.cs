@@ -320,6 +320,104 @@ public sealed class SymbolLibraryCheckedContractTests
         SymbolLibraryCheckedContract.ValidateResponse(response, document, epoch, operation, expected);
     }
 
+    [TestMethod]
+    public void DurableAdmissionSurvivesMcpReplacementAndUnknownOutcomeBlocksRedispatch()
+    {
+        string root = Directory.CreateTempSubdirectory("symbol-checked-receipts-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = ReceiptRequest();
+            var first = new SymbolLibraryCheckedReceiptStore(root);
+            Assert.IsTrue(first.Reserve(instance, request).Created);
+
+            var reopened = new SymbolLibraryCheckedReceiptStore(root);
+            var duplicate = reopened.Reserve(instance, request);
+            Assert.IsFalse(duplicate.Created);
+            Assert.AreEqual(SymbolLibraryCheckedReceiptRecord.Admitted, duplicate.Receipt.Outcome);
+
+            reopened.WriteUnknown(instance, request, "operation_outcome_unknown", "transport loss");
+            var unknown = new SymbolLibraryCheckedReceiptStore(root).Read(instance, request.OperationId);
+            Assert.IsNotNull(unknown);
+            Assert.AreEqual(SymbolLibraryCheckedReceiptRecord.Unknown, unknown!.Outcome);
+
+            var blocked = new SymbolLibraryCheckedReceiptStore(root).Reserve(instance, request);
+            Assert.IsFalse(blocked.Created);
+            Assert.AreEqual(SymbolLibraryCheckedReceiptRecord.Unknown, blocked.Receipt.Outcome);
+            Assert.IsNull(new SymbolLibraryCheckedReceiptStore(root).Read(
+                Guid.NewGuid().ToString("D"), request.OperationId));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public void DurableTerminalReceiptSurvivesMcpReplacementAndRejectsTampering()
+    {
+        string root = Directory.CreateTempSubdirectory("symbol-checked-terminal-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = ReceiptRequest();
+            var store = new SymbolLibraryCheckedReceiptStore(root);
+            _ = store.Reserve(instance, request);
+            var response = new NativeCapabilitySymbolLibraryCheckedWriteResponse
+            {
+                Document = request.Document.Clone(), ProcessEpoch = request.ProcessEpoch,
+                OperationId = request.OperationId, Status = "unavailable",
+                ErrorCode = "library_mutation_unavailable", ErrorMessage = "provider unavailable",
+                ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsUnavailable,
+                Scope = "mcp_direct_symbol_file", ExpectedRequestVerified = true,
+                Request = request.Clone(),
+                RequestFingerprintSha256 = SymbolLibraryCheckedContract.ComputeFingerprint(request)
+            };
+            store.WriteTerminal(instance, request, response);
+
+            var reopened = new SymbolLibraryCheckedReceiptStore(root);
+            var record = reopened.Read(instance, request.OperationId);
+            Assert.IsNotNull(record);
+            Assert.AreEqual(SymbolLibraryCheckedReceiptRecord.Terminal, record!.Outcome);
+            var restored = SymbolLibraryCheckedReceiptStore.ParseResponse(record.ResponseJson);
+            SymbolLibraryCheckedContract.ValidateResponse(restored, request);
+            Assert.AreEqual(response, restored);
+
+            string path = Directory.GetFiles(Path.Combine(root, "symbol-library-checked-receipts"), "*.json").Single();
+            File.WriteAllText(path, File.ReadAllText(path).Replace(request.OperationId,
+                Guid.NewGuid().ToString("D"), StringComparison.Ordinal));
+            Assert.ThrowsExactly<AutomationException>(() => reopened.Read(instance, request.OperationId));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public void PreDispatchAdmissionCanBeRemovedOnlyForTheExactRequest()
+    {
+        string root = Directory.CreateTempSubdirectory("symbol-checked-remove-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = ReceiptRequest();
+            var store = new SymbolLibraryCheckedReceiptStore(root);
+            _ = store.Reserve(instance, request);
+            store.RemoveAdmission(instance, request);
+            Assert.IsTrue(new SymbolLibraryCheckedReceiptStore(root).Reserve(instance, request).Created);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static NativeCapabilitySymbolLibraryCheckedWrite ReceiptRequest()
+    {
+        (DocumentSpecifier document, _, _, _) = Fixture();
+        string epoch = Guid.NewGuid().ToString("D");
+        string operation = Guid.NewGuid().ToString("D");
+        var state = State(document, epoch, sequence: 1, new string('a', 64));
+        return new()
+        {
+            Document = document, ProcessEpoch = epoch, OperationId = operation,
+            ExpectedSnapshotSha256 = state.StateSha256, ExpectedState = state,
+            Definition = new() { Id = document.LibId.Clone() }, Overwrite = true
+        };
+    }
+
     private static NativeCapabilitySymbolLibraryCheckedWriteResponse Response(
         DocumentSpecifier document, string epoch, string operation, string status,
         bool committed = false, bool replayed = false, bool rollbackCompleted = false,

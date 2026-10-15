@@ -107,7 +107,7 @@ def main() -> None:
 
     version = linux_artifact["version"]
     run_name = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + commit[:12]
-    work_root = Path(required("KICAD_PREVIEW_WORK_ROOT")) / run_name
+    work_root = Path(configured("KICAD_PREVIEW_WORK_ROOT", "/mnt/build-storage/codex/kicad/delivery/preview28")) / run_name
     work_root.mkdir(parents=True, exist_ok=False)
     release_path = work_root / "release.json"
     feed_path = work_root / "preview.json"

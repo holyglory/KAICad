@@ -3241,4 +3241,4 @@ retained_artifacts=[{name="completion-and-verification",path="automation/artifac
 name="inventory"
 tier="pre-merge"
 requires=["observe"]
-command=["python3","-c","import json, subprocess; receipt=json.loads(subprocess.check_output(['devcoordinator2','completion','check','--file','automation/artifacts/preview28-linux-delivery/completion.json'], text=True)); print(json.dumps(receipt)); assert receipt.get('ok') and receipt.get('data', {}).get('valid'), 'Completion inventory rejected'"]
+command=["python3","-c","import json, os, subprocess; receipt=json.loads(subprocess.check_output(['devcoordinator2','completion','check','--file','automation/artifacts/preview28-linux-delivery/completion.json',os.getcwd()], text=True)); print(json.dumps(receipt)); assert receipt.get('ok') and receipt.get('data', {}).get('valid'), 'Completion inventory rejected'"]

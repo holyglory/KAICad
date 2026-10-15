@@ -3,6 +3,7 @@ using Kiapi.Common.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Protocol;
+using System.Text.Json.Nodes;
 
 namespace KiCad.Automation.Tests;
 
@@ -27,10 +28,18 @@ public sealed class FootprintLibraryCheckedReceiptStoreTests
             Assert.AreEqual(FootprintLibraryCheckedReceiptRecord.Admitted, duplicate.Receipt.Outcome);
 
             reopened.WriteUnknown(instance, request, "operation_outcome_unknown", "transport loss");
-            var unknown = new FootprintLibraryCheckedReceiptStore(root).Read(instance, request.OperationId);
+            var recovered = new FootprintLibraryCheckedReceiptStore(root);
+            var unknown = recovered.ReadBound(instance, request);
             Assert.IsNotNull(unknown);
             Assert.AreEqual(FootprintLibraryCheckedReceiptRecord.Unknown, unknown!.Outcome);
             Assert.AreEqual("operation_outcome_unknown", unknown.ErrorCode);
+            Assert.AreEqual(request.ProcessEpoch, unknown.ProcessEpoch);
+
+            var replacedProcess = request.Clone();
+            replacedProcess.ProcessEpoch = Guid.NewGuid().ToString("D");
+            AutomationException epochConflict = Assert.ThrowsExactly<AutomationException>(() =>
+                recovered.ReadBound(instance, replacedProcess));
+            Assert.AreEqual("operation_id_conflict", epochConflict.Code);
 
             var blocked = new FootprintLibraryCheckedReceiptStore(root).Reserve(instance, request);
             Assert.IsFalse(blocked.Created);
@@ -40,6 +49,62 @@ public sealed class FootprintLibraryCheckedReceiptStoreTests
             conflict.ExpectedSnapshotSha256 = new string('f', 64);
             Assert.ThrowsExactly<AutomationException>(() =>
                 new FootprintLibraryCheckedReceiptStore(root).Reserve(instance, conflict));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    [DataRow("missing_document")]
+    [DataRow("other_project")]
+    [DataRow("other_entry")]
+    [DataRow("other_process")]
+    [DataRow("missing_revision")]
+    [DataRow("other_revision_epoch")]
+    public void ExpectedStateMustRetainTheRequestDocumentAndProcess(string mismatch)
+    {
+        string root = Directory.CreateTempSubdirectory("footprint-checked-binding-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = Request(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"));
+            var mismatched = request.Clone();
+            switch (mismatch)
+            {
+                case "missing_document": mismatched.ExpectedState.Document = null; break;
+                case "other_project": mismatched.ExpectedState.Document.Project.Path = "/tmp/other-project"; break;
+                case "other_entry": mismatched.ExpectedState.Document.LibId.EntryName = "Other"; break;
+                case "other_process": mismatched.ExpectedState.ProcessEpoch = Guid.NewGuid().ToString("D"); break;
+                case "missing_revision": mismatched.ExpectedState.Revision = null; break;
+                case "other_revision_epoch": mismatched.ExpectedState.Revision.Epoch = Guid.NewGuid().ToString("D"); break;
+                default: Assert.Fail("Unexpected expected-state mismatch."); break;
+            }
+            // Rehash every changed byte so these cases exercise lifecycle binding,
+            // rather than merely rejecting a stale digest or request fingerprint.
+            mismatched.ExpectedState.StateSha256 =
+                FootprintLibraryCheckedContract.ComputeStateDigest(mismatched.ExpectedState);
+            mismatched.ExpectedSnapshotSha256 = mismatched.ExpectedState.StateSha256;
+
+            var store = new FootprintLibraryCheckedReceiptStore(root);
+            AutomationException lookupFailure = Assert.ThrowsExactly<AutomationException>(() =>
+                store.ReadBound(instance, mismatched));
+            Assert.AreEqual("invalid_footprint_receipt", lookupFailure.Code);
+            AutomationException admissionFailure = Assert.ThrowsExactly<AutomationException>(() =>
+                store.Reserve(instance, mismatched));
+            Assert.AreEqual("invalid_footprint_receipt", admissionFailure.Code);
+
+            // A receipt written by an older process may have a self-consistent
+            // fingerprint while its checkpoint names another native lifecycle.
+            _ = store.Reserve(instance, request);
+            string path = Directory.GetFiles(Path.Combine(root, "footprint-library-checked-receipts"), "*.json").Single();
+            JsonObject journal = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            journal["requestJson"] = SchematicJson.Formatter.Format(mismatched);
+            journal["requestFingerprintSha256"] = FootprintLibraryCheckedContract.ComputeFingerprint(mismatched);
+            File.WriteAllText(path, journal.ToJsonString());
+
+            var reopened = new FootprintLibraryCheckedReceiptStore(root);
+            AutomationException recoveryFailure = Assert.ThrowsExactly<AutomationException>(() =>
+                reopened.Read(instance, request.OperationId));
+            Assert.AreEqual("invalid_footprint_receipt", recoveryFailure.Code);
         }
         finally { Directory.Delete(root, true); }
     }

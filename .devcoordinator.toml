@@ -734,7 +734,7 @@ role="preflight"
 invalidates=["publish","rendered"]
 command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
 [[test.native-updater-journey.check]]
-name="pub"
+name="publish"
 tier="development"
 command=["dotnet","publish","automation/src/KiCad.Automation.Mcp/KiCad.Automation.Mcp.csproj","--configuration","Debug","--runtime","linux-x64","--self-contained","true","-p:RestoreLockedMode=true","--output","automation/artifacts/updater-helper"]
 [[test.native-updater-journey.check]]
@@ -3195,7 +3195,7 @@ retained_artifacts=[{name="delivery-evidence",path="automation/artifacts/platfor
 [test.preview28-linux-publish]
 env={KICAD_PREVIEW_WORK_ROOT="/mnt/build-storage/codex/kicad/delivery/preview28"}
 [[test.preview28-linux-publish.check]]
-name="publish"
+name="pub"
 command=["python3","automation/qualification/publish-linux-preview.py"]
 [test.preview28-linux-public]
 timeout_seconds=3600

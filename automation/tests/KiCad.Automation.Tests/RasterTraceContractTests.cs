@@ -110,6 +110,21 @@ public sealed class RasterTraceContractTests
     }
 
     [TestMethod]
+    public void RasterProjectionRejectsSelfIntersectingFilledGeometry()
+    {
+        RasterTraceResult proposal = ValidProjectionProposal();
+        proposal.FilledPieces[0].Points.Clear();
+        proposal.FilledPieces[0].Points.Add(Point(0, 0));
+        proposal.FilledPieces[0].Points.Add(Point(10, 10));
+        proposal.FilledPieces[0].Points.Add(Point(0, 10));
+        proposal.FilledPieces[0].Points.Add(Point(10, 0));
+        proposal.FilledPieces[0].Points.Add(Point(10, 5));
+        proposal.FilledPieces[0].Bounds = Bounds(0, 0, 10, 10);
+
+        AssertInvalidProjection(proposal);
+    }
+
+    [TestMethod]
     public void RasterProjectionRejectsFilledPieceWithFewerThanThreePoints()
     {
         RasterTraceResult proposal = ValidProjectionProposal();

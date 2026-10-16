@@ -652,10 +652,70 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             if (signedAreaTwice == 0)
                 throw new AutomationException("invalid_raster_trace_proposal", "Filled piece geometry must have nonzero signed area.");
 
+            // A self-intersecting filled outline has ambiguous fill topology
+            // (for example, a bow-tie polygon).  Native graphic primitives
+            // would accept the vertices, but the resulting fill can differ by
+            // renderer and is not a manufacturable closed region.  Reject
+            // every intersection between non-adjacent edges while preserving
+            // the ordinary shared endpoints of adjacent edges.
+            for (int first = 0; first < piece.Points.Count; first++)
+            {
+                int nextFirst = (first + 1) % piece.Points.Count;
+                for (int second = first + 1; second < piece.Points.Count; second++)
+                {
+                    int nextSecond = (second + 1) % piece.Points.Count;
+                    if (first == second || nextFirst == second || nextSecond == first)
+                        continue;
+                    if (SegmentsIntersect(piece.Points[first], piece.Points[nextFirst],
+                        piece.Points[second], piece.Points[nextSecond]))
+                        throw new AutomationException("invalid_raster_trace_proposal",
+                            "Filled piece edges must not self-intersect.");
+                }
+            }
+
             if (piece.SourceContourIds.Any(id => !retainedContourIds.Contains(id)))
                 throw new AutomationException("invalid_raster_trace_proposal", "Filled pieces must reference retained source contours.");
         }
     }
+
+    private static bool SegmentsIntersect(
+        KiCad.Automation.Protocol.RasterTracePoint firstStart,
+        KiCad.Automation.Protocol.RasterTracePoint firstEnd,
+        KiCad.Automation.Protocol.RasterTracePoint secondStart,
+        KiCad.Automation.Protocol.RasterTracePoint secondEnd)
+    {
+        Int128 firstSecondStart = Orientation(firstStart, firstEnd, secondStart);
+        Int128 firstSecondEnd = Orientation(firstStart, firstEnd, secondEnd);
+        Int128 secondFirstStart = Orientation(secondStart, secondEnd, firstStart);
+        Int128 secondFirstEnd = Orientation(secondStart, secondEnd, firstEnd);
+
+        if (Sign(firstSecondStart) != Sign(firstSecondEnd)
+            && Sign(secondFirstStart) != Sign(secondFirstEnd))
+            return true;
+
+        return firstSecondStart == 0 && OnSegment(firstStart, firstEnd, secondStart)
+            || firstSecondEnd == 0 && OnSegment(firstStart, firstEnd, secondEnd)
+            || secondFirstStart == 0 && OnSegment(secondStart, secondEnd, firstStart)
+            || secondFirstEnd == 0 && OnSegment(secondStart, secondEnd, firstEnd);
+    }
+
+    private static Int128 Orientation(
+        KiCad.Automation.Protocol.RasterTracePoint first,
+        KiCad.Automation.Protocol.RasterTracePoint second,
+        KiCad.Automation.Protocol.RasterTracePoint third)
+        => ((Int128) second.XNm - first.XNm) * ((Int128) third.YNm - first.YNm)
+            - ((Int128) second.YNm - first.YNm) * ((Int128) third.XNm - first.XNm);
+
+    private static int Sign(Int128 value) => value < 0 ? -1 : value > 0 ? 1 : 0;
+
+    private static bool OnSegment(
+        KiCad.Automation.Protocol.RasterTracePoint first,
+        KiCad.Automation.Protocol.RasterTracePoint second,
+        KiCad.Automation.Protocol.RasterTracePoint point)
+        => point.XNm >= Math.Min(first.XNm, second.XNm)
+            && point.XNm <= Math.Max(first.XNm, second.XNm)
+            && point.YNm >= Math.Min(first.YNm, second.YNm)
+            && point.YNm <= Math.Max(first.YNm, second.YNm);
 
     private static void ValidateSymbolTarget(RasterTraceSymbolTargetInput target)
     {

@@ -189,30 +189,100 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
             request => request.JobSettings, outputIsDirectory: false, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_receipt", ReadOnly = true),
-     Description("Read a durable MCP-state schematic export receipt by operation ID without contacting KiCad. A missing receipt is found=false with unknown-native-outcome; a retained receipt survives MCP restart but never authorizes an automatic retry or a replacement native process."),
+     Description("Read a durable MCP-state schematic export receipt by operation ID without replaying the export. Supply expectedRequestJson from the original export when the native process epoch changed; the exact request is checked and a terminal result is returned from durable state without native lookup or retry. Admitted and unknown outcomes remain fail-closed with retryDispatched=false."),
      KiCadCapability("schematic-manufacturing", "mcp-state-receipt", "operation ID, instance identity and process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
-    public Task<CallToolResult> Receipt(string instanceId, string operationId, string processEpoch,
-        CancellationToken cancellationToken)
+    public async Task<CallToolResult> Receipt(string instanceId, string operationId, string processEpoch,
+        CancellationToken cancellationToken, string? expectedRequestJson = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!Guid.TryParseExact(operationId, "D", out var id) || id == Guid.Empty
             || !string.Equals(operationId, id.ToString("D"), StringComparison.Ordinal))
-            return Task.FromResult(Error("invalid_operation_id", "operationId must be a canonical UUID."));
+            return Error("invalid_operation_id", "operationId must be a canonical UUID.");
         if (!Guid.TryParseExact(processEpoch, "D", out var epoch) || epoch == Guid.Empty
             || !string.Equals(processEpoch, epoch.ToString("D"), StringComparison.Ordinal))
-            return Task.FromResult(Error("invalid_process_epoch", "processEpoch must be a canonical UUID."));
+            return Error("invalid_process_epoch", "processEpoch must be a canonical UUID.");
+        SchematicExportReceiptRequest? expectedRequest;
+        try
+        {
+            expectedRequest = string.IsNullOrWhiteSpace(expectedRequestJson)
+                ? null : SchematicExportReceiptRequest.Parse(expectedRequestJson);
+        }
+        catch (AutomationException error) { return Error(error.Code, error.Message); }
         SchematicExportReceiptRecord? receipt;
-        try { receipt = new SchematicExportReceiptStore(registry.StateDirectory).Read(instanceId, operationId); }
+        SchematicExportReceiptStore store = new(registry.StateDirectory);
+        try
+        {
+            receipt = expectedRequest is null
+                ? store.Read(instanceId, operationId)
+                : store.ReadBound(instanceId, expectedRequest);
+        }
         catch (AutomationException error)
-        { return Task.FromResult(Error(error.Code, error.Message)); }
+        { return Error(error.Code, error.Message); }
         if (receipt is null)
-            return Task.FromResult(Data(new { instanceId, processEpoch, operationId, found = false,
-                receiptScope = "mcp-state", retrySafety = "unknown-native-outcome" }));
-        if (!string.Equals(receipt.ProcessEpoch, processEpoch, StringComparison.Ordinal))
-            return Task.FromResult(Error("stale_process_epoch", "The receipt belongs to another native process epoch."));
-        return Task.FromResult(Data(new { instanceId, processEpoch, operationId, found = true,
-            receiptScope = "mcp-state", replayableWithinProcess = true, receipt = receipt.Result }));
+            return Data(new { instanceId, processEpoch, operationId, found = false,
+                receiptScope = "mcp-state", nativeReceiptAvailable = false,
+                retrySafety = "unknown-native-outcome", retryDispatched = false });
+
+        bool sameProcessEpoch = string.Equals(receipt.ProcessEpoch, processEpoch, StringComparison.Ordinal);
+        if (!sameProcessEpoch)
+        {
+            if (expectedRequest is null)
+                return Error("stale_process_epoch", "The original schematic export request is required to recover a receipt after native process replacement.");
+            NativeClient replacement;
+            AutomationSession replacementSession;
+            try
+            {
+                replacement = registry.Client(instanceId);
+                replacementSession = await replacement.HandshakeAsync(cancellationToken);
+            }
+            catch (Exception error) when (error is AutomationException or NativeApiException or NngException)
+            { return Error(error is AutomationException known ? known.Code : "native_process_unavailable", error.Message); }
+            if (replacementSession.InstanceId != instanceId || replacementSession.Epoch != processEpoch)
+                return Error("stale_process_epoch", "The current native process epoch does not match the recovery request.");
+            if (receipt.Outcome == SchematicExportReceiptRecord.Completed)
+                return Data(new
+                {
+                    instanceId, processEpoch, durableProcessEpoch = receipt.ProcessEpoch,
+                    operationId, found = true, receiptScope = "mcp-state",
+                    outcome = receipt.Outcome, retrySafety = "terminal-receipt",
+                    nativeReceiptAvailable = false, durableRecovery = true,
+                    retryDispatched = false, receipt = receipt.Result
+                });
+            return RecoveryUnknown(instanceId, processEpoch, operationId, receipt, durableRecovery: true);
+        }
+
+        if (receipt.Outcome is SchematicExportReceiptRecord.Unknown or SchematicExportReceiptRecord.Admitted)
+            return RecoveryUnknown(instanceId, processEpoch, operationId, receipt, durableRecovery: false);
+        return Data(new { instanceId, processEpoch, operationId, found = true,
+            receiptScope = "mcp-state", replayableWithinProcess = true,
+            outcome = receipt.Outcome, nativeReceiptAvailable = false,
+            retryDispatched = false, receipt = receipt.Result });
+    }
+
+    private static CallToolResult RecoveryUnknown(string instanceId, string processEpoch,
+        string operationId, SchematicExportReceiptRecord receipt, bool durableRecovery)
+    {
+        JsonElement structured = JsonSerializer.SerializeToElement(new
+        {
+            instanceId,
+            processEpoch,
+            durableProcessEpoch = receipt.ProcessEpoch,
+            operationId,
+            found = true,
+            receiptScope = "mcp-state",
+            outcome = receipt.Outcome,
+            retrySafety = "unknown-native-outcome",
+            nativeReceiptAvailable = false,
+            durableRecovery,
+            retryDispatched = false,
+            errorCode = string.IsNullOrWhiteSpace(receipt.ErrorCode) ? "operation_outcome_unknown" : receipt.ErrorCode,
+            errorMessage = string.IsNullOrWhiteSpace(receipt.ErrorMessage)
+                ? "The schematic export has no terminal native receipt; inspect the export output before retrying."
+                : receipt.ErrorMessage
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return new CallToolResult { IsError = true, StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }] };
     }
 
     private async Task<CallToolResult> ExportJob<TRequest>(string instanceId, string requestJson,
@@ -222,6 +292,10 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
     {
         bool nativeDispatchStarted = false;
         bool exportReplyReceived = false;
+        bool nativeJobSucceeded = false;
+        bool admissionWritten = false;
+        SchematicExportReceiptRequest? retainedRequest = null;
+        SchematicExportReceiptStore receiptStore = new(registry.StateDirectory);
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -233,15 +307,16 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
                     throw new AutomationException("invalid_operation_id", "operationId must be a canonical UUID.");
                 canonicalOperationId = parsed.ToString("D");
             }
-            string fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
-                instanceId + "\n" + jobKind + "\n" + requestJson + "\n" + expectedStateJson)));
-            SchematicExportReceiptStore receiptStore = new(registry.StateDirectory);
+            string fingerprint = SchematicExportReceiptRequest.ComputeFingerprint(
+                instanceId, jobKind, requestJson, expectedStateJson);
             SchematicExportReceiptRecord? prior = canonicalOperationId is null
                 ? null : receiptStore.Read(instanceId, canonicalOperationId);
             if (prior is not null)
             {
                 if (!string.Equals(prior.Fingerprint, fingerprint, StringComparison.Ordinal))
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different schematic export request.");
+                if (prior.Outcome is SchematicExportReceiptRecord.Unknown or SchematicExportReceiptRecord.Admitted)
+                    return RecoveryUnknown(instanceId, prior.ProcessEpoch, canonicalOperationId!, prior, durableRecovery: false);
                 return new CallToolResult { StructuredContent = prior.Result,
                     Content = [new TextContentBlock { Text = prior.Result.GetRawText() }] };
             }
@@ -289,12 +364,20 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
                 throw new AutomationException("schematic_export_dirty",
                     "The schematic has unsaved native changes; save before exporting.");
 
+            if (canonicalOperationId is not null)
+            {
+                retainedRequest = new SchematicExportReceiptRequest(instanceId, expected.ProcessEpoch,
+                    canonicalOperationId, jobKind, requestJson, expectedStateJson);
+                receiptStore.WriteAdmitted(retainedRequest);
+                admissionWritten = true;
+            }
             nativeDispatchStarted = true;
             RunJobResponse result = await client.InvokeAsync<TRequest, RunJobResponse>(request, cancellationToken);
             exportReplyReceived = true;
             if (result.Status != JobStatus.JsSuccess)
                 throw new AutomationException("schematic_export_failed", string.IsNullOrWhiteSpace(result.Message)
                     ? $"KiCad did not complete the schematic {jobKind} export." : result.Message);
+            nativeJobSucceeded = true;
             IReadOnlyList<object> outputs = await BuildManifest(result.OutputPath, job.OutputPath,
                 outputIsDirectory, cancellationToken);
             DocumentLifecycleState after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
@@ -314,8 +397,8 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
             });
             var completed = new CallToolResult { StructuredContent = structured,
                 Content = [new TextContentBlock { Text = structured.GetRawText() }] };
-            if (canonicalOperationId is not null)
-                receiptStore.Write(new(1, instanceId, canonicalOperationId, fingerprint, session.Epoch, structured));
+            if (retainedRequest is not null)
+                receiptStore.WriteTerminal(retainedRequest, structured);
             return completed;
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException
@@ -330,13 +413,23 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
                     && ambiguousKnown.Code is ("instance_exited" or "instance_changed" or "operation_outcome_unknown"));
             bool nativeDispatch = nativeDispatchStarted && (error is not NngException
                 || ((NngException)error).RequestDelivered);
-            string code = error is AutomationException known ? known.Code
-                : error is NativeApiException native ? "native_status_" + native.Status
-                : error is NngException transport ? "transport_status_" + transport.ErrorCode
+            string errorCode = error is AutomationException knownError ? knownError.Code
+                : error is NativeApiException nativeError ? "native_status_" + nativeError.Status
+                : error is NngException transportError ? "transport_status_" + transportError.ErrorCode
                 : "schematic_export_failed";
+            if (retainedRequest is not null && admissionWritten)
+            {
+                bool knownNativeFailure = exportReplyReceived && !nativeJobSucceeded
+                    && error is AutomationException knownFailure
+                    && knownFailure.Code == "schematic_export_failed";
+                if (ambiguousDispatch || transportDelivered || nativeJobSucceeded)
+                    receiptStore.WriteUnknown(retainedRequest, errorCode, error.Message);
+                else if (knownNativeFailure || !nativeDispatch)
+                    receiptStore.RemoveAdmission(retainedRequest);
+            }
             JsonElement structured = JsonSerializer.SerializeToElement(new
             {
-                errorCode = code, errorMessage = error.Message, job = jobKind,
+                errorCode, errorMessage = error.Message, job = jobKind,
                 nativeDispatch,
                 dispatchOutcome = ambiguousDispatch || transportDelivered ? "indeterminate" : nativeDispatch ? "confirmed" : "unsubmitted",
                 outputVerification = exportReplyReceived ? "incomplete" : "not_attempted",

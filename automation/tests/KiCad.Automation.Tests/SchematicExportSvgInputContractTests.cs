@@ -89,6 +89,76 @@ public sealed class SchematicExportSvgInputContractTests
     }
 
     [TestMethod]
+    public async Task ReceiptRecoveryAfterNativeReplacementReturnsTerminalStateWithoutExportDispatch()
+    {
+        string directory = Directory.CreateTempSubdirectory("schematic-export-restart-receipt-").FullName;
+        string instanceId = Guid.NewGuid().ToString("D");
+        string originalEpoch = Guid.NewGuid().ToString("D");
+        string replacementEpoch = Guid.NewGuid().ToString("D");
+        string operationId = Guid.NewGuid().ToString("D");
+        var request = new SchematicExportReceiptRequest(instanceId, originalEpoch, operationId, "svg",
+            "{\"request\":true}", "{\"state\":true}");
+        using JsonDocument result = JsonDocument.Parse($"{{\"instanceId\":\"{instanceId}\",\"processEpoch\":\"{originalEpoch}\",\"operationId\":\"{operationId}\",\"outcome\":\"completed\"}}");
+        new SchematicExportReceiptStore(directory).WriteTerminal(request, result.RootElement);
+
+        var transport = new SchematicExportTransport(instanceId, replacementEpoch);
+        var registry = new InstanceRegistry(transport, directory);
+        try
+        {
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), instanceId);
+            var reply = await new SchematicJobTools(registry).Receipt(instanceId, operationId,
+                replacementEpoch, default, request.Serialize());
+
+            Assert.IsTrue(reply.IsError != true, reply.StructuredContent?.ToString());
+            JsonElement payload = reply.StructuredContent!.Value;
+            Assert.IsTrue(payload.GetProperty("found").GetBoolean());
+            Assert.IsTrue(payload.GetProperty("durableRecovery").GetBoolean());
+            Assert.AreEqual(originalEpoch, payload.GetProperty("durableProcessEpoch").GetString());
+            Assert.AreEqual("terminal-receipt", payload.GetProperty("retrySafety").GetString());
+            Assert.IsFalse(payload.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsFalse(payload.GetProperty("retryDispatched").GetBoolean());
+            Assert.AreEqual(operationId, payload.GetProperty("receipt").GetProperty("operationId").GetString());
+            Assert.AreEqual(2, transport.Requests.Count,
+                "Recovery may handshake with the replacement, but must not dispatch or look up an export.");
+            Assert.IsTrue(transport.Requests.All(requestEnvelope => requestEnvelope.Message.Is(GetAutomationSession.Descriptor)));
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public async Task ReceiptRecoveryAfterNativeReplacementKeepsUnknownOutcomeFailClosed()
+    {
+        string directory = Directory.CreateTempSubdirectory("schematic-export-unknown-restart-").FullName;
+        string instanceId = Guid.NewGuid().ToString("D");
+        string originalEpoch = Guid.NewGuid().ToString("D");
+        string replacementEpoch = Guid.NewGuid().ToString("D");
+        string operationId = Guid.NewGuid().ToString("D");
+        var request = new SchematicExportReceiptRequest(instanceId, originalEpoch, operationId, "svg",
+            "{\"request\":true}", "{\"state\":true}");
+        new SchematicExportReceiptStore(directory).WriteUnknown(request,
+            "operation_outcome_unknown", "The native export reply was lost.");
+
+        var transport = new SchematicExportTransport(instanceId, replacementEpoch);
+        var registry = new InstanceRegistry(transport, directory);
+        try
+        {
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), instanceId);
+            var reply = await new SchematicJobTools(registry).Receipt(instanceId, operationId,
+                replacementEpoch, default, request.Serialize());
+
+            Assert.IsTrue(reply.IsError, reply.StructuredContent?.ToString());
+            JsonElement payload = reply.StructuredContent!.Value;
+            Assert.AreEqual("unknown", payload.GetProperty("outcome").GetString());
+            Assert.AreEqual("unknown-native-outcome", payload.GetProperty("retrySafety").GetString());
+            Assert.IsFalse(payload.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsFalse(payload.GetProperty("retryDispatched").GetBoolean());
+            Assert.AreEqual(2, transport.Requests.Count);
+            Assert.IsTrue(transport.Requests.All(requestEnvelope => requestEnvelope.Message.Is(GetAutomationSession.Descriptor)));
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
     public void TypedSvgInputPreservesDocumentPlotSettingsAndRepeatedPages()
     {
         string projectPath = Path.Combine(Path.GetTempPath(), "schematic-svg-contract");

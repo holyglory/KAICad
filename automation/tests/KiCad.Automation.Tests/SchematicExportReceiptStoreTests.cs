@@ -92,4 +92,74 @@ public sealed class SchematicExportReceiptStoreTests
         }
         finally { Directory.Delete(root, true); }
     }
+
+    [TestMethod]
+    public void BoundTerminalReceiptRetainsExactRequestAcrossStoreReopen()
+    {
+        string root = Directory.CreateTempSubdirectory("schematic-export-bound-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            string operation = Guid.NewGuid().ToString("D");
+            string epoch = Guid.NewGuid().ToString("D");
+            var request = new SchematicExportReceiptRequest(instance, epoch, operation, "svg",
+                "{\"request\":true}", "{\"state\":true}");
+            using JsonDocument result = JsonDocument.Parse($"{{\"instanceId\":\"{instance}\",\"processEpoch\":\"{epoch}\",\"operationId\":\"{operation}\",\"outcome\":\"completed\"}}");
+            var store = new SchematicExportReceiptStore(root);
+
+            store.WriteAdmitted(request);
+            store.WriteTerminal(request, result.RootElement);
+
+            var retained = new SchematicExportReceiptStore(root).ReadBound(instance, request);
+            Assert.IsNotNull(retained);
+            Assert.AreEqual(SchematicExportReceiptRecord.Completed, retained.Outcome);
+            Assert.AreEqual(request.RequestJson, retained.RequestJson);
+            Assert.AreEqual(request.ExpectedStateJson, retained.ExpectedStateJson);
+            Assert.AreEqual(request.Fingerprint, retained.Fingerprint);
+
+            var changed = request with { RequestJson = "{\"request\":false}" };
+            var error = Assert.ThrowsExactly<AutomationException>(() =>
+                new SchematicExportReceiptStore(root).ReadBound(instance, changed));
+            Assert.AreEqual("operation_id_reused", error.Code);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public void BoundAdmittedAndUnknownReceiptsRemainFailClosed()
+    {
+        string root = Directory.CreateTempSubdirectory("schematic-export-unknown-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            string operation = Guid.NewGuid().ToString("D");
+            string epoch = Guid.NewGuid().ToString("D");
+            var request = new SchematicExportReceiptRequest(instance, epoch, operation, "pdf",
+                "{\"request\":true}", "{\"state\":true}");
+            var store = new SchematicExportReceiptStore(root);
+
+            store.WriteAdmitted(request);
+            var admitted = store.ReadBound(instance, request);
+            Assert.IsNotNull(admitted);
+            Assert.AreEqual(SchematicExportReceiptRecord.Admitted, admitted.Outcome);
+            Assert.AreEqual("operation_admitted", admitted.ErrorCode);
+
+            store.WriteUnknown(request, "transport_status_timeout", "The native reply was lost.");
+            var unknown = new SchematicExportReceiptStore(root).ReadBound(instance, request);
+            Assert.IsNotNull(unknown);
+            Assert.AreEqual(SchematicExportReceiptRecord.Unknown, unknown.Outcome);
+            Assert.AreEqual("transport_status_timeout", unknown.ErrorCode);
+            Assert.AreEqual("The native reply was lost.", unknown.ErrorMessage);
+            Assert.IsFalse(unknown.Result.GetProperty("retryDispatched").GetBoolean());
+
+            // An indeterminate operation cannot be replaced by a terminal
+            // result under the same UUID, even if a caller presents the old
+            // request again.
+            using JsonDocument result = JsonDocument.Parse("{\"outcome\":\"completed\"}");
+            store.WriteTerminal(request, result.RootElement);
+            Assert.AreEqual(SchematicExportReceiptRecord.Unknown,
+                new SchematicExportReceiptStore(root).ReadBound(instance, request)!.Outcome);
+        }
+        finally { Directory.Delete(root, true); }
+    }
 }

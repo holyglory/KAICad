@@ -881,6 +881,26 @@ BOOST_AUTO_TEST_CASE( PNSDetachedRouteUpdateUsesSourceAndRejectsOrphans )
     BOOST_CHECK( emptyCommit.Empty() );
     BOOST_CHECK_EQUAL( nativeTrack->GetStart(), nativeStart );
     BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), nativeEnd );
+
+    // A route callback must not stage an item into a commit owned by another board.  This
+    // mirrors the replacement/epoch window that can leave an InlineDrag branch alive while its
+    // editor document is being replaced, and keeps BOARD_COMMIT from seeing an invalid owner.
+    BOARD otherBoard;
+    TOOL_MANAGER otherMgr;
+    otherMgr.SetEnvironment( &otherBoard, nullptr, nullptr, nullptr, nullptr );
+    KI_TEST::DUMMY_TOOL* otherTool = new KI_TEST::DUMMY_TOOL();
+    otherMgr.RegisterTool( otherTool );
+
+    PNS::SEGMENT wrongBoard( SEG( VECTOR2I( 100000, 100000 ), VECTOR2I( 600000, 100000 ) ), nullptr );
+    wrongBoard.SetWidth( 10000 );
+    wrongBoard.SetLayer( F_Cu );
+    wrongBoard.SetSourceItem( nativeTrack );
+
+    BOARD_COMMIT wrongBoardCommit( otherTool );
+    iface.modifyBoardItem( &wrongBoard, wrongBoardCommit );
+    BOOST_CHECK( wrongBoardCommit.Empty() );
+    BOOST_CHECK_EQUAL( nativeTrack->GetStart(), nativeStart );
+    BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), nativeEnd );
 }
 
 

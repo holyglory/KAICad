@@ -2507,7 +2507,13 @@ void PNS_KICAD_IFACE_BASE::SyncWorld( PNS::NODE *aWorld )
 void PNS_KICAD_IFACE::EraseView()
 {
     for( BOARD_ITEM* item : m_hiddenItems )
-        m_view->SetVisible( item, true );
+    {
+        // Hidden items are retained by the router preview and may outlive a native board
+        // removal.  The view also asks the item whether it is a BOARD_ITEM, so reject stale
+        // addresses before crossing that boundary.
+        if( IsLiveBoardItem( item ) )
+            m_view->SetVisible( item, true );
+    }
 
     m_hiddenItems.clear();
 
@@ -2708,6 +2714,9 @@ void PNS_KICAD_IFACE::RemoveItem( PNS::ITEM* aItem )
 
     if( parent )
     {
+        if( !m_commit || m_commit->GetBoard() != m_board || !IsLiveBoardItem( parent ) )
+            return;
+
         if( EDA_GROUP* group = parent->GetParentGroup() )
             m_itemGroups[parent] = group;
 
@@ -2855,8 +2864,19 @@ void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem, BOARD_COMMIT& aCommit )
     if( !IsLiveBoardItem( original ) )
         return;
 
+    auto admitCommit = [&]()
+    {
+        return aCommit.GetBoard() == m_board && IsLiveBoardItem( original );
+    };
+
     if( auto materialized = MaterializeRouteItem( aItem, true ) )
     {
+        // Materialization may clone a source item and invoke board-side property accessors.
+        // Recheck admission immediately before handing the raw pointer to COMMIT: a route
+        // branch can outlive a board replacement between the initial lookup and this point.
+        if( !admitCommit() )
+            return;
+
         aCommit.Modify( original );
         original->CopyFrom( materialized.get() );
     }
@@ -2867,7 +2887,12 @@ void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem, BOARD_COMMIT& aCommit )
         m_fpOffsets[pad].p_new = static_cast<PNS::SOLID*>( aItem )->Pos();
     }
     else
+    {
+        if( !admitCommit() )
+            return;
+
         aCommit.Modify( original );
+    }
 }
 
 void PNS_KICAD_IFACE::UpdateItem( PNS::ITEM* aItem )
@@ -2963,6 +2988,9 @@ void PNS_KICAD_IFACE::applyFootprintOffsets( BOARD_COMMIT& aCommit )
         if( processedFootprints.find( footprint ) != processedFootprints.end() )
             continue;
 
+        if( aCommit.GetBoard() != m_board || !IsLiveBoardItem( footprint ) )
+            continue;
+
         processedFootprints.insert( footprint );
         aCommit.Modify( footprint );
         footprint->SetPosition( p_new );
@@ -2976,6 +3004,45 @@ void PNS_KICAD_IFACE::Commit()
 {
     PCB_SELECTION_TOOL* selTool = m_tool->GetManager()->GetTool<PCB_SELECTION_TOOL>();
 
+    // EDA_GROUP is a non-owning interface and can retain an address after the board has
+    // removed the corresponding PCB_GROUP.  Compare addresses against the board's group
+    // container without dereferencing the candidate; only a confirmed live group may enter
+    // BOARD_COMMIT or receive newly-created route items.
+    auto isLiveGroup = [this]( const EDA_GROUP* aGroup )
+    {
+        if( !m_board || !aGroup )
+            return false;
+
+        if( std::any_of( m_board->Groups().begin(), m_board->Groups().end(),
+                         [aGroup]( const auto* group )
+                         {
+                             return reinterpret_cast<const void*>( group )
+                                    == reinterpret_cast<const void*>( aGroup );
+                         } ) )
+            return true;
+
+        // Footprint-local groups are valid PCB_GROUP owners as well.  They are not present in
+        // BOARD::Groups(), so walk the already-live footprint containers by address before any
+        // group method is called.
+        for( const FOOTPRINT* footprint : m_board->Footprints() )
+        {
+            if( std::any_of( footprint->Groups().begin(), footprint->Groups().end(),
+                             [aGroup]( const auto* group )
+                             {
+                                 return reinterpret_cast<const void*>( group )
+                                        == reinterpret_cast<const void*>( aGroup );
+                             } ) )
+                return true;
+        }
+
+        return std::any_of( m_board->Generators().begin(), m_board->Generators().end(),
+                            [aGroup]( const auto* generator )
+                            {
+                                return reinterpret_cast<const void*>( generator )
+                                       == reinterpret_cast<const void*>( aGroup );
+                            } );
+    };
+
     EraseView();
     applyFootprintOffsets( *m_commit );
 
@@ -2988,9 +3055,18 @@ void PNS_KICAD_IFACE::Commit()
         else if( auto it = m_itemGroups.find( src ); it != m_itemGroups.end() )
             group = it->second;
 
-        if( group )
+        if( group && isLiveGroup( group ) )
         {
-            m_commit->Modify( group->AsEdaItem(), nullptr, RECURSE_MODE::NO_RECURSE );
+            EDA_ITEM* groupItem = group->AsEdaItem();
+
+            // PCB_GROUP is the only EDA_GROUP used by the PCB router.  Keep this check after
+            // the address-only liveness probe so IsBOARD_ITEM() cannot be called on a stale
+            // object, matching the route-item admission used by modifyBoardItem().
+            if( !groupItem || !groupItem->IsBOARD_ITEM()
+                || !IsLiveBoardItem( static_cast<BOARD_ITEM*>( groupItem ) ) )
+                continue;
+
+            m_commit->Modify( groupItem, nullptr, RECURSE_MODE::NO_RECURSE );
 
             for( BOARD_ITEM* bi : items )
                 group->AddItem( bi );

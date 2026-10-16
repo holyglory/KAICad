@@ -4821,6 +4821,12 @@ public sealed partial class NativeSessionTests
                     drcJobStateJson = SchematicJson.Formatter.Format(drc)
                 };
                 var requestOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+                // RerouteApply sends the complete DRC state to its checked
+                // native boundary, but the durable route receipt deliberately
+                // fingerprints only the stable job locator.  Preserve that
+                // canonical request form for exact reconnect validation.
+                string canonicalDrcJson = SchematicJson.Formatter.Format(
+                    new PcbDrcJobState { JobId = drc.JobId });
                 string originalRequestJson = JsonSerializer.Serialize(new
                 {
                     instanceId,
@@ -4829,7 +4835,7 @@ public sealed partial class NativeSessionTests
                     deleteRequestJson = deleteJson,
                     createRequestJson = candidateJson,
                     expectedStateJson = SchematicJson.Formatter.Format(baseline),
-                    drcJobStateJson = SchematicJson.Formatter.Format(drc)
+                    drcJobStateJson = canonicalDrcJson
                 }, requestOptions);
 
                 int settledSockets = await firstMcp.SettledSocketCount(token);

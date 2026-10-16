@@ -80,6 +80,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativePcbItems")]
     public Task NativePcbItemsAreCreatedAndUpdatedThroughMcp() => RunNativeSessions(NativeJourney.PcbItems);
 
+    [TestMethod, TestCategory("NativePcbDrc")]
+    public Task NativePcbDrcRefillUsesDetachedInputsThroughMcp() => RunNativeSessions(NativeJourney.PcbDrcRefill);
+
     [TestMethod, TestCategory("NativePcbItems")]
     public Task NativePcbConnectivityQueryUsesTypedNativeSummaries() => RunNativeSessions(NativeJourney.PcbConnectivity);
 
@@ -152,7 +155,7 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeComponentRebind")]
     public Task NativeComponentReplacementKeepsExactInstructionsAndHistory() => RunNativeSessions(NativeJourney.ComponentRebind);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbConnectivity, PcbViaMinimization, PcbDifferentialPair, CrossProbe,
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbDrcRefill, PcbConnectivity, PcbViaMinimization, PcbDifferentialPair, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
         ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata, SchematicExport, SchematicCrossProbe, SchematicHierarchy }
 
@@ -183,6 +186,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.RecursiveEditor => Path.Combine("native-recursive-editor", theme),
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
+                NativeJourney.PcbDrcRefill => "native-net-settings",
                 NativeJourney.PcbConnectivity => "native-pcb-items",
                 NativeJourney.PcbViaMinimization => "native-pcb-items",
                 NativeJourney.PcbDifferentialPair => "native-pcb-items",
@@ -207,6 +211,7 @@ public sealed partial class NativeSessionTests
         string caseIdentity = journey switch
         {
             NativeJourney.PcbItems => nameof(NativePcbItemsAreCreatedAndUpdatedThroughMcp),
+            NativeJourney.PcbDrcRefill => nameof(NativePcbDrcRefillUsesDetachedInputsThroughMcp),
             NativeJourney.PcbConnectivity => nameof(NativePcbConnectivityQueryUsesTypedNativeSummaries),
             NativeJourney.PcbViaMinimization => nameof(NativePcbViaMinimizationAppliesCheckedReplacementThroughMcp),
             NativeJourney.PcbDifferentialPair => nameof(NativeDifferentialPairApplyConnectsBothPadPairsThroughMcp),
@@ -252,6 +257,7 @@ public sealed partial class NativeSessionTests
             // prior 450s default therefore cancelled during the second editor;
             // retain per-action limits and give this two-editor journey 900s.
             : journey == NativeJourney.NetSettings ? 900
+            : journey == NativeJourney.PcbDrcRefill ? 600
             : journey == NativeJourney.ProjectRecovery ? 2400 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
@@ -644,6 +650,8 @@ public sealed partial class NativeSessionTests
                             ":" + displayNumber, registry, processes.Add, deadline.Token);
                     else if (journey == NativeJourney.PcbItems)
                         await VerifyNativePcbItems(client, opened.Document, evidence, target.Id, focusProcessId, ":" + displayNumber, deadline.Token);
+                    else if (journey == NativeJourney.PcbDrcRefill)
+                        await VerifyNativePcbDrcRefill(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.PcbConnectivity)
                         await VerifyNativePcbConnectivity(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.PcbViaMinimization)

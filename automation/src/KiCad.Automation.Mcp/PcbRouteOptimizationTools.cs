@@ -707,10 +707,16 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             CallToolResult result = await action();
             if (result.IsError == true && result.StructuredContent is JsonElement errorPayload
                 && errorPayload.TryGetProperty("errorCode", out JsonElement errorCode)
-                && string.Equals(errorCode.GetString(), "operation_outcome_unknown", StringComparison.Ordinal))
+                && errorCode.ValueKind == JsonValueKind.String
+                && errorCode.GetString() is "operation_outcome_unknown" or "instance_exited")
             {
+                // A native peer can disappear before the transport classifies
+                // the exchange as an NNG delivery loss.  Preserve the exact
+                // returned error for this call, but retain a durable unknown
+                // receipt under the common recovery code so a replacement
+                // process cannot treat the operation as safely replayable.
                 store.WriteUnknown(receiptRequest.InstanceId, receiptRequest.ProcessEpoch, receiptRequest.OperationId, digest,
-                    errorCode.GetString()!, errorPayload.TryGetProperty("errorMessage", out JsonElement message)
+                    "operation_outcome_unknown", errorPayload.TryGetProperty("errorMessage", out JsonElement message)
                         ? message.GetString() ?? "Native route outcome is unknown."
                         : "Native route outcome is unknown.", requestJson);
             }

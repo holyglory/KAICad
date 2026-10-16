@@ -199,6 +199,30 @@ internal sealed class SymbolLibraryCheckedReceiptStore
         return record;
     }
 
+    /// <summary>
+    /// Read the exact durable request after the native editor has been replaced.
+    /// The request keeps the epoch that admitted the write while the caller
+    /// supplies the currently attached epoch separately.  This method never
+    /// changes the binding or authorizes a dispatch; an admitted or unknown
+    /// record remains fail-closed until an operator reconciles it.
+    /// </summary>
+    internal SymbolLibraryCheckedReceiptRecord? ReadBoundAfterNativeRestart(
+        string instanceId,
+        NativeCapabilitySymbolLibraryCheckedWrite request,
+        string currentProcessEpoch)
+    {
+        if (!SymbolLibraryCheckedReceiptRecord.CanonicalGuid(currentProcessEpoch))
+            throw new AutomationException("invalid_process_epoch", "The current native process epoch must be a canonical UUID.");
+        if (request.ProcessEpoch == currentProcessEpoch)
+            return ReadBound(instanceId, request);
+
+        SymbolLibraryCheckedReceiptRecord? record = ReadBound(instanceId, request);
+        if (record is not null && record.ProcessEpoch == currentProcessEpoch)
+            throw SymbolLibraryCheckedReceiptRecord.Invalid(
+                "A receipt marked as recovered after native restart must retain the original process epoch.");
+        return record;
+    }
+
     internal void WriteTerminal(string instanceId,
         NativeCapabilitySymbolLibraryCheckedWrite request,
         NativeCapabilitySymbolLibraryCheckedWriteResponse response)

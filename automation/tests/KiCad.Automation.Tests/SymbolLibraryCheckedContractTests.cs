@@ -1,3 +1,8 @@
+using System.Text.Json;
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common;
+using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
@@ -420,6 +425,112 @@ public sealed class SymbolLibraryCheckedContractTests
     }
 
     [TestMethod]
+    public void DurableUnknownReceiptIsRecoverableAcrossNativeRestartWithoutRedispatch()
+    {
+        string root = Directory.CreateTempSubdirectory("symbol-checked-restart-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = ReceiptRequest();
+            var first = new SymbolLibraryCheckedReceiptStore(root);
+            _ = first.Reserve(instance, request);
+            first.WriteUnknown(instance, request, "operation_outcome_unknown", "native process ended after dispatch");
+
+            string replacementEpoch = Guid.NewGuid().ToString("D");
+            var reopened = new SymbolLibraryCheckedReceiptStore(root);
+            SymbolLibraryCheckedReceiptRecord? recovered = reopened.ReadBoundAfterNativeRestart(
+                instance, request, replacementEpoch);
+
+            Assert.IsNotNull(recovered);
+            Assert.AreEqual(SymbolLibraryCheckedReceiptRecord.Unknown, recovered!.Outcome);
+            Assert.AreEqual(request.ProcessEpoch, recovered.ProcessEpoch);
+
+            // A caller holding the replacement epoch cannot turn the old
+            // operation into a new admission: the durable old request remains
+            // bound to its original epoch and exact bytes.
+            var replacementRequest = request.Clone();
+            replacementRequest.ProcessEpoch = replacementEpoch;
+            AutomationException conflict = Assert.ThrowsExactly<AutomationException>(() =>
+                reopened.Reserve(instance, replacementRequest));
+            Assert.AreEqual("operation_id_conflict", conflict.Code);
+            Assert.AreEqual(SymbolLibraryCheckedReceiptRecord.Unknown,
+                reopened.Read(instance, request.OperationId)!.Outcome);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CheckedReceiptReturnsTerminalDurableEvidenceAfterNativeRestartWithoutLookup()
+    {
+        string root = Directory.CreateTempSubdirectory("symbol-checked-tool-terminal-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = ReceiptRequest();
+            var store = new SymbolLibraryCheckedReceiptStore(root);
+            _ = store.Reserve(instance, request);
+            store.WriteTerminal(instance, request, TerminalResponse(request));
+
+            string replacementEpoch = Guid.NewGuid().ToString("D");
+            var transport = new SymbolReceiptTransport(instance, replacementEpoch);
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), instance);
+
+            var result = await new SchematicSymbolLibraryTools(registry).CheckedReceipt(
+                instance, replacementEpoch, SchematicJson.Formatter.Format(request.Document),
+                request.OperationId, SchematicJson.Formatter.Format(request), default);
+
+            Assert.IsFalse(result.IsError ?? false, JsonSerializer.Serialize(result.StructuredContent));
+            var data = JsonSerializer.SerializeToElement(result.StructuredContent);
+            Assert.AreEqual(replacementEpoch, data.GetProperty("processEpoch").GetString());
+            Assert.AreEqual(request.ProcessEpoch, data.GetProperty("durableProcessEpoch").GetString());
+            Assert.IsTrue(data.GetProperty("durableRecovery").GetBoolean());
+            Assert.IsFalse(data.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsFalse(data.GetProperty("retryDispatched").GetBoolean());
+            Assert.AreEqual("terminal-receipt", data.GetProperty("retrySafety").GetString());
+            Assert.AreEqual("unavailable", data.GetProperty("receipt").GetProperty("status").GetString());
+            Assert.AreEqual(0, transport.NativeCalls,
+                "A receipt-only recovery must not issue a native checked-read request.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CheckedReceiptReturnsFailClosedUnknownAfterNativeRestartWithoutRetry()
+    {
+        string root = Directory.CreateTempSubdirectory("symbol-checked-tool-unknown-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = ReceiptRequest();
+            var store = new SymbolLibraryCheckedReceiptStore(root);
+            _ = store.Reserve(instance, request);
+            store.WriteUnknown(instance, request, "operation_outcome_unknown", "native process ended after dispatch");
+
+            string replacementEpoch = Guid.NewGuid().ToString("D");
+            var transport = new SymbolReceiptTransport(instance, replacementEpoch);
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), instance);
+
+            var result = await new SchematicSymbolLibraryTools(registry).CheckedReceipt(
+                instance, replacementEpoch, SchematicJson.Formatter.Format(request.Document),
+                request.OperationId, SchematicJson.Formatter.Format(request), default);
+
+            Assert.IsTrue(result.IsError ?? false, JsonSerializer.Serialize(result.StructuredContent));
+            var data = JsonSerializer.SerializeToElement(result.StructuredContent);
+            Assert.AreEqual("operation_outcome_unknown", data.GetProperty("errorCode").GetString());
+            Assert.AreEqual(replacementEpoch, data.GetProperty("processEpoch").GetString());
+            Assert.AreEqual(request.ProcessEpoch, data.GetProperty("durableProcessEpoch").GetString());
+            Assert.AreEqual("unknown", data.GetProperty("outcome").GetString());
+            Assert.AreEqual("unknown-native-outcome", data.GetProperty("retrySafety").GetString());
+            Assert.IsFalse(data.GetProperty("retryDispatched").GetBoolean());
+            Assert.AreEqual(0, transport.NativeCalls,
+                "An unknown durable outcome must remain receipt-only after restart.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public void DurableTerminalReplayKeepsTheImmutableOriginalReceipt()
     {
         string root = Directory.CreateTempSubdirectory("symbol-checked-replay-").FullName;
@@ -499,6 +610,20 @@ public sealed class SymbolLibraryCheckedContractTests
             BeforeSnapshotSha256 = before ?? string.Empty, AfterSnapshotSha256 = after ?? string.Empty
         };
 
+    private static NativeCapabilitySymbolLibraryCheckedWriteResponse TerminalResponse(
+        NativeCapabilitySymbolLibraryCheckedWrite request)
+    {
+        var response = Response(request.Document, request.ProcessEpoch, request.OperationId,
+            status: "unavailable", errorCode: "library_mutation_unavailable",
+            errorMessage: "The native lifecycle owner is not available.");
+        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsUnavailable;
+        response.Scope = "mcp_direct_symbol_file";
+        response.ExpectedRequestVerified = true;
+        response.Request = request.Clone();
+        response.RequestFingerprintSha256 = SymbolLibraryCheckedContract.ComputeFingerprint(request);
+        return response;
+    }
+
     private static (DocumentSpecifier Document, string Epoch, string Operation, string Expected) Fixture()
     {
         var document = new DocumentSpecifier
@@ -533,5 +658,42 @@ public sealed class SymbolLibraryCheckedContractTests
         };
         state.StateSha256 = SymbolLibraryCheckedContract.ComputeStateDigest(state);
         return state;
+    }
+
+    private sealed class SymbolReceiptTransport(string instanceId, string epoch) : INativeTransport
+    {
+        internal int NativeCalls { get; private set; }
+
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] request,
+            TimeSpan timeout, CancellationToken cancellationToken = default)
+        {
+            var api = ApiRequest.Parser.ParseFrom(request);
+            IMessage payload;
+            if (api.Message.Is(GetAutomationSession.Descriptor))
+            {
+                payload = new AutomationSession
+                {
+                    ProtocolVersion = 1,
+                    InstanceId = instanceId,
+                    Epoch = epoch,
+                    ProjectPath = "/tmp/symbol-receipt-fixture.kicad_pro"
+                };
+            }
+            else
+            {
+                NativeCalls++;
+                payload = new GetVersionResponse
+                {
+                    Version = new KiCadVersion { FullVersion = "symbol-receipt-fixture" }
+                };
+            }
+
+            return Task.FromResult(new ApiResponse
+            {
+                Header = new ApiResponseHeader { KicadToken = epoch },
+                Status = new ApiResponseStatus { Status = (ApiStatusCode)1 },
+                Message = Any.Pack(payload)
+            }.ToByteArray());
+        }
     }
 }

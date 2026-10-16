@@ -119,7 +119,7 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
     });
 
     [McpServerTool(Name = "kicad_symbol_library_checked_receipt", ReadOnly = true),
-     Description("Read one exact checked direct-symbol-file receipt after a lost reply or MCP reconnect. The request is matched against the durable MCP journal and, when available, the native process receipt; lookup never retries or dispatches a writer."),
+     Description("Read one exact checked direct-symbol-file receipt after a lost reply, MCP reconnect or native process restart. Supply the current process epoch and the original request JSON; after an epoch change the durable old-epoch record is returned without a native lookup or writer retry, and admitted or unknown outcomes remain fail-closed."),
      KiCadCapability("symbol-library", "checked-native-direct-symbol-file", "exact checked request, durable MCP receipt, native revision and rollback evidence"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
     public Task<CallToolResult> CheckedReceipt(string instanceId, string expectedProcessEpoch,
@@ -132,11 +132,71 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
         try { expectedRequest = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryCheckedWrite>(expectedRequestJson); }
         catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
         { throw new AutomationException("invalid_library_request", "expectedRequestJson is not valid checked symbol-library request: " + error.Message); }
-        if (!expectedRequest.Document.Equals(document) || expectedRequest.ProcessEpoch != expectedProcessEpoch
+        if (expectedRequest.Document is null || !expectedRequest.Document.Equals(document)
+            || !SymbolLibraryCheckedReceiptRecord.CanonicalGuid(expectedRequest.ProcessEpoch)
             || expectedRequest.OperationId != operationId)
-            throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
+            throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, original process epoch and operation UUID.");
         var receiptStore = new SymbolLibraryCheckedReceiptStore(registry.StateDirectory);
-        SymbolLibraryCheckedReceiptRecord? durableBeforeNative = receiptStore.ReadBound(instanceId, expectedRequest);
+        bool sameProcessEpoch = expectedRequest.ProcessEpoch == expectedProcessEpoch;
+        SymbolLibraryCheckedReceiptRecord? durableBeforeNative = sameProcessEpoch
+            ? receiptStore.ReadBound(instanceId, expectedRequest)
+            : receiptStore.ReadBoundAfterNativeRestart(instanceId, expectedRequest, expectedProcessEpoch);
+
+        // A changed epoch cannot answer the original checked request: the
+        // native receipt table belongs to the old process.  Confirm that the
+        // replacement process is the one named by the caller, then return only
+        // the exact durable MCP record.  This branch never invokes a native
+        // lookup or a writer, so an admitted/unknown result cannot be replayed
+        // accidentally after a restart.
+        if (!sameProcessEpoch)
+        {
+            NativeClient replacement = registry.Client(instanceId);
+            AutomationSession replacementSession = await replacement.HandshakeAsync(cancellationToken);
+            if (replacementSession.InstanceId != instanceId || replacementSession.Epoch != expectedProcessEpoch)
+                throw new AutomationException("stale_process_epoch", "The current native process epoch does not match the recovery request.");
+            if (durableBeforeNative is null)
+                throw new AutomationException("stale_process_epoch", "The original checked symbol request has no durable receipt; inspect the library before retrying.");
+
+            if (durableBeforeNative.Outcome == SymbolLibraryCheckedReceiptRecord.Terminal)
+            {
+                NativeCapabilitySymbolLibraryCheckedWriteResponse retained =
+                    SymbolLibraryCheckedReceiptStore.ParseResponse(durableBeforeNative.ResponseJson);
+                SymbolLibraryCheckedContract.ValidateResponse(retained, expectedRequest);
+                retained.Replayed = true;
+                return Data(new
+                {
+                    instanceId,
+                    processEpoch = expectedProcessEpoch,
+                    durableProcessEpoch = durableBeforeNative.ProcessEpoch,
+                    operationId,
+                    found = true,
+                    receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(retained)),
+                    nativeReceiptAvailable = false,
+                    durableRecovery = true,
+                    retryDispatched = false,
+                    retrySafety = "terminal-receipt"
+                });
+            }
+
+            return Data(new
+            {
+                instanceId,
+                processEpoch = expectedProcessEpoch,
+                durableProcessEpoch = durableBeforeNative.ProcessEpoch,
+                operationId,
+                found = true,
+                receipt = (JsonElement?)null,
+                nativeReceiptAvailable = false,
+                durableRecovery = true,
+                retryDispatched = false,
+                outcome = durableBeforeNative.Outcome,
+                retrySafety = "unknown-native-outcome",
+                errorCode = "operation_outcome_unknown",
+                errorMessage = durableBeforeNative.ErrorMessage.Length == 0
+                    ? "The checked symbol write has no terminal receipt; inspect the native library before retrying."
+                    : durableBeforeNative.ErrorMessage
+            }, error: true);
+        }
         NativeCapabilitySymbolLibraryCheckedReadOperationResponse? nativeResponse = null;
         AutomationException? nativeUnavailable = null;
         try

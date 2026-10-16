@@ -1,8 +1,10 @@
 using System.Text.Json;
 using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common;
 using Kiapi.Board.Jobs;
 using Kiapi.Common.Commands;
+using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
@@ -110,6 +112,75 @@ public sealed class PcbManufacturingRecoveryContractTests
 
             PcbManufacturingContract.ValidateTypedRecoveryJob(request);
         }
+    }
+
+    [TestMethod]
+    public async Task TypedCancellationAcknowledgesDispatchedWorkerWithoutClaimingTerminal()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-manufacturing-cancel-ack-").FullName;
+        const string instanceId = "33333333-3333-3333-3333-333333333333";
+        const string processEpoch = "22222222-2222-2222-2222-222222222222";
+        const string operationId = "11111111-1111-1111-1111-111111111111";
+        try
+        {
+            DocumentSpecifier document = new()
+            {
+                Type = DocumentType.DoctypePcb,
+                BoardFilename = "board.kicad_pcb",
+                Project = new() { Name = "cancel-ack", Path = root }
+            };
+            var receipt = new PcbManufacturingExportReceipt
+            {
+                OperationId = operationId,
+                ProcessEpoch = processEpoch,
+                Document = document.Clone(),
+                DurableJournalSha256 = new string('a', 64),
+                Status = PcbManufacturingExportStatus.PcbMfgExportRunning,
+                DispatchStage = PcbManufacturingDispatchStage.PcbMfgDispatchSubmitted,
+                NativeDispatch = true,
+                Terminal = false,
+                WorkerFinished = false,
+                WorkerStarted = true,
+                WorkerJoined = false,
+                CancellationRequested = true,
+                RecoveryState = PcbManufacturingRecoveryState.PcbMfgRecoveryCancelRequested,
+                PublicationCommitted = false,
+                OutputDirectory = Path.Combine(root, "out")
+            };
+            var peer = new TypedCancellationPeer(instanceId, processEpoch, receipt);
+            var registry = new InstanceRegistry(peer, Path.Combine(root, "state"));
+            await registry.AttachAsync("ipc:///tmp/pcb-manufacturing-cancel-ack", instanceId);
+
+            var result = await new PcbJobTools(registry).ExportCancelTyped(instanceId,
+                new PcbManufacturingCancelInput
+                {
+                    Document = new NativeDocumentInput
+                    {
+                        Type = NativeDocumentType.Pcb,
+                        Project = new NativeProjectInput { Name = "cancel-ack", Path = root },
+                        BoardFilename = "board.kicad_pcb"
+                    },
+                    ProcessEpoch = processEpoch,
+                    OperationId = operationId
+                }, CancellationToken.None);
+
+            Assert.IsFalse(result.IsError, result.StructuredContent?.GetRawText());
+            JsonElement data = result.StructuredContent!.Value;
+            Assert.IsTrue(data.GetProperty("recoverySupported").GetBoolean(), data.GetRawText());
+            Assert.IsTrue(data.GetProperty("cancellationSupported").GetBoolean(), data.GetRawText());
+            Assert.IsTrue(data.GetProperty("cancellationAccepted").GetBoolean(), data.GetRawText());
+            Assert.IsFalse(data.GetProperty("cancellationTerminal").GetBoolean(), data.GetRawText());
+            Assert.IsTrue(data.GetProperty("cancellationRequested").GetBoolean(), data.GetRawText());
+            Assert.AreEqual(PcbExportRecoveryPolicy.Submitted,
+                data.GetProperty("operationOutcome").GetString(), data.GetRawText());
+            Assert.AreEqual(PcbManufacturingRecoveryState.PcbMfgRecoveryCancelRequested.ToString(),
+                data.GetProperty("recoveryState").GetString(), data.GetRawText());
+            Assert.IsTrue(data.TryGetProperty("receipt", out JsonElement receiptJson), data.GetRawText());
+            Assert.IsTrue(!receiptJson.TryGetProperty("terminal", out JsonElement terminal)
+                || !terminal.GetBoolean(), data.GetRawText());
+            Assert.AreEqual(1, peer.CancellationRequests);
+        }
+        finally { Directory.Delete(root, true); }
     }
 
     [TestMethod]
@@ -362,5 +433,48 @@ public sealed class PcbManufacturingRecoveryContractTests
             : type.ValueKind == JsonValueKind.Array
                 && type.EnumerateArray().Any(item => item.ValueKind == JsonValueKind.String
                     && item.GetString() == expected);
+    }
+
+    private sealed class TypedCancellationPeer(string instanceId, string epoch,
+        PcbManufacturingExportReceipt receipt) : INativeTransport
+    {
+        internal int CancellationRequests { get; private set; }
+
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] bytes, TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ApiRequest request = ApiRequest.Parser.ParseFrom(bytes);
+            if (request.Message.Is(GetAutomationSession.Descriptor))
+            {
+                return Task.FromResult(Response(new AutomationSession
+                {
+                    ProtocolVersion = 1,
+                    InstanceId = instanceId,
+                    ProjectPath = receipt.Document.Project.Path,
+                    Epoch = epoch
+                }));
+            }
+
+            if (request.Message.Is(CancelPcbManufacturingExport.Descriptor))
+            {
+                CancellationRequests++;
+                CancelPcbManufacturingExport cancel = request.Message.Unpack<CancelPcbManufacturingExport>();
+                Assert.AreEqual(receipt.OperationId, cancel.OperationId);
+                Assert.AreEqual(receipt.ProcessEpoch, cancel.ProcessEpoch);
+                Assert.IsTrue(cancel.Document.Equals(receipt.Document));
+                return Task.FromResult(Response(receipt));
+            }
+
+            throw new AssertFailedException("Unexpected typed manufacturing request: "
+                + request.Message.TypeUrl);
+        }
+
+        private byte[] Response(IMessage message) => new ApiResponse
+        {
+            Header = new() { KicadToken = epoch },
+            Status = new() { Status = ApiStatusCode.AsOk },
+            Message = Any.Pack(message)
+        }.ToByteArray();
     }
 }

@@ -73,7 +73,7 @@ public sealed partial class PcbJobTools
     }, input?.OperationId, input?.ExpectedState?.ProcessEpoch);
 
     [McpServerTool(Name = "kicad_pcb_export_cancel_typed", ReadOnly = false),
-     Description("Request cancellation of one typed PCB manufacturing export through the native manager. The current synchronous exporter has no cancellation manager, so the call fails closed with recoverySupported=false and preserves the durable operation outcome. No output is deleted or declared cancelled by this boundary."),
+     Description("Request cancellation of one typed PCB manufacturing export through the native manager. A pre-dispatch request may return a terminal cancellation receipt; a dispatched worker may return a non-terminal cancellation acknowledgement that must be reconciled before its final outcome is known. The tool never deletes output or declares a dispatched export cancelled until a terminal receipt proves it."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-contract", "explicit PCB document, operation ID, current process epoch and fail-closed cancellation result"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportCancelTyped(string instanceId,
@@ -92,20 +92,36 @@ public sealed partial class PcbJobTools
             PcbManufacturingExportReceipt receipt = await client.InvokeAsync<CancelPcbManufacturingExport,
                 PcbManufacturingExportReceipt>(request, cancellationToken);
             ValidateManagerReceiptIdentity(receipt, request.Document, request.OperationId, request.ProcessEpoch);
-            if( receipt.RecoveryState != PcbManufacturingRecoveryState.PcbMfgRecoveryCancelled )
+            bool terminalCancellation = receipt.RecoveryState
+                == PcbManufacturingRecoveryState.PcbMfgRecoveryCancelled;
+            bool cancellationAcknowledged = receipt.RecoveryState
+                == PcbManufacturingRecoveryState.PcbMfgRecoveryCancelRequested;
+            if( !terminalCancellation && !cancellationAcknowledged )
                 throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
-                    "The native manager did not cancel this operation; its previous outcome remains unchanged.");
-            if( receipt.RecoveryState == PcbManufacturingRecoveryState.PcbMfgRecoveryCancelled
+                    "The native manager did not acknowledge cancellation; its previous outcome remains unchanged.");
+            if( terminalCancellation
                 && (!receipt.CancellationRequested || !receipt.Terminal || receipt.NativeDispatch
                     || receipt.Artifacts.Count != 0 || receipt.PublicationCommitted) )
                 throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                     "The native cancellation receipt does not prove a pre-dispatch cancellation.");
+            if( cancellationAcknowledged
+                && (!receipt.CancellationRequested || receipt.Terminal || receipt.WorkerFinished
+                    || !receipt.NativeDispatch
+                    || receipt.Status != PcbManufacturingExportStatus.PcbMfgExportRunning
+                    || receipt.DispatchStage != PcbManufacturingDispatchStage.PcbMfgDispatchSubmitted
+                    || receipt.Artifacts.Count != 0 || receipt.PublicationCommitted) )
+                throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                    "The native cancellation acknowledgement is not a non-terminal dispatched-worker receipt.");
             return Data(new
             {
                 instanceId, processEpoch = session.Epoch, operationId = request.OperationId,
                 recoverySupported = true, cancellationSupported = true,
+                cancellationAccepted = true, cancellationTerminal = terminalCancellation,
                 cancellationRequested = receipt.CancellationRequested,
                 workerFinished = receipt.WorkerFinished,
+                operationOutcome = terminalCancellation
+                    ? PcbExportRecoveryPolicy.Cancelled
+                    : PcbExportRecoveryPolicy.Submitted,
                 recoveryState = receipt.RecoveryState.ToString(),
                 receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(receipt))
             });

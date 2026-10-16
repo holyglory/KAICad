@@ -8,7 +8,7 @@ using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Native;
 
-public sealed record SchematicProjectSheet(Guid Id, string Name);
+public sealed record SchematicProjectSheet(Guid Id, string Name, string Filename = "");
 
 /// <summary>The derived project entries needed to open a missing schematic root.
 /// Captured project settings are restored later by the native rebuild, not inferred here.</summary>
@@ -45,6 +45,7 @@ public sealed class SchematicProjectSkeleton
             throw new AutomationException("invalid_project_skeleton", "The XML must declare one canonical root sheet identity.");
 
         var sheets = new Dictionary<Guid, SchematicProjectSheet>();
+        var sharedScreens = new Dictionary<Guid, string>();
         foreach (var screen in hierarchy.Instances)
         foreach (var sheet in screen.Items.Where(i => i.Is(SheetSymbol.Descriptor)).Select(i => i.Unpack<SheetSymbol>()))
         {
@@ -54,13 +55,26 @@ public sealed class SchematicProjectSkeleton
                 || sheet.NameField.Text.Text_.Contains('\0')
                 || string.IsNullOrWhiteSpace(sheet.FilenameField?.Text?.Text_))
                 throw new AutomationException("invalid_project_skeleton", "Every sheet symbol must carry a canonical ID, name and filename.");
-            var entry = new SchematicProjectSheet(id, sheet.NameField.Text.Text_);
+            // A repeated sheet can legitimately reuse one physical screen with
+            // different per-instance names. Keep each child filename in the
+            // derived identity even though KiCad's `sheets` array stores only
+            // UUID and display name; otherwise a conflicting shared-sheet path
+            // would be silently discarded while rebuilding a missing project.
+            var entry = new SchematicProjectSheet(id, sheet.NameField.Text.Text_, sheet.FilenameField.Text.Text_);
             if (sheets.TryGetValue(id, out var existing) && existing != entry)
                 throw new AutomationException("conflicting_project_skeleton", "Repeated sheet instances disagree about a sheet entry.");
+            if (Guid.TryParseExact(sheet.ChildScreenId?.Value, "D", out Guid screenId))
+            {
+                if (sharedScreens.TryGetValue(screenId, out var prior)
+                    && !string.Equals(prior, entry.Filename, StringComparison.Ordinal))
+                    throw new AutomationException("conflicting_project_skeleton",
+                        "Repeated instances of one physical sheet disagree about its child filename.");
+                sharedScreens[screenId] = entry.Filename;
+            }
             sheets[id] = entry;
         }
 
-        var ordered = new List<SchematicProjectSheet> { new(rootId, project.Name) };
+        var ordered = new List<SchematicProjectSheet> { new(rootId, project.Name, project.Name + ".kicad_sch") };
         ordered.AddRange(sheets.Values.Where(s => s.Id != rootId).OrderBy(s => s.Id));
         return new(projectFile, rootId, project.Name, ordered.AsReadOnly());
     }

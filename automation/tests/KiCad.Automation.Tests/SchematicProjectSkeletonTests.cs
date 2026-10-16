@@ -31,6 +31,7 @@ public sealed class SchematicProjectSkeletonTests
             Assert.AreEqual(Path.Combine(directory, "fixture.kicad_pro"), skeleton.ProjectFile);
             Assert.AreEqual(root, skeleton.RootSheetId);
             Assert.AreSequenceEqual(new[] { "fixture", "Child" }, skeleton.Sheets.Select(s => s.Name).ToArray());
+            Assert.AreEqual("child.kicad_sch", skeleton.Sheets.Single(s => s.Id == child).Filename);
             Assert.IsTrue(skeleton.CreateIfMissing(skeleton.ProjectFile));
             byte[] first = File.ReadAllBytes(skeleton.ProjectFile);
             Assert.IsFalse(skeleton.CreateIfMissing(skeleton.ProjectFile));
@@ -56,6 +57,46 @@ public sealed class SchematicProjectSkeletonTests
             hierarchy.Instances.Add(new SchematicScreenData { Metadata = new() { Document = document.Clone(), ScreenId = new() { Value = Guid.NewGuid().ToString("D") } } });
             var skeleton = SchematicProjectSkeleton.FromHierarchy(hierarchy);
             Assert.ThrowsExactly<AutomationException>(() => skeleton.CreateIfMissing(Path.Combine(directory, "other.kicad_pro")));
+        }
+        finally { try { Directory.Delete(directory, true); } catch (IOException) { } }
+    }
+
+    [TestMethod]
+    public void RejectsRepeatedSheetIdentityWithConflictingFilename()
+    {
+        string directory = Directory.CreateTempSubdirectory("kicad-project-skeleton-").FullName;
+        try
+        {
+            Guid rootId = Guid.NewGuid(), firstSheet = Guid.NewGuid(), secondSheet = Guid.NewGuid(), sharedScreen = Guid.NewGuid();
+            var document = new DocumentSpecifier { Type = DocumentType.DoctypeSchematic,
+                Project = new ProjectSpecifier { Name = "fixture", Path = directory }, SheetPath = new() };
+            document.SheetPath.Path.Add(new KIID { Value = rootId.ToString("D") });
+            SheetSymbol Sheet(Guid id, string filename) => new()
+            {
+                Id = new KIID { Value = id.ToString("D") },
+                Path = document.SheetPath.Clone(), ChildScreenId = new KIID { Value = sharedScreen.ToString("D") },
+                NameField = new() { Text = new() { Text_ = "Shared" } },
+                FilenameField = new() { Text = new() { Text_ = filename } }
+            };
+            var hierarchy = new SchematicHierarchyData { Document = document.Clone() };
+            var rootScreen = new SchematicScreenData
+            {
+                Metadata = new() { Document = document.Clone(), ScreenId = new() { Value = Guid.NewGuid().ToString("D") } },
+                Items = { Any.Pack(Sheet(firstSheet, "shared-a.kicad_sch")), Any.Pack(Sheet(secondSheet, "shared-b.kicad_sch")) }
+            };
+            hierarchy.Instances.Add(rootScreen);
+            foreach (Guid id in new[] { firstSheet, secondSheet })
+            {
+                var childDocument = document.Clone();
+                childDocument.SheetPath.Path.Add(new KIID { Value = id.ToString("D") });
+                hierarchy.Instances.Add(new SchematicScreenData
+                {
+                    Metadata = new() { Document = childDocument, ScreenId = new() { Value = sharedScreen.ToString("D") } }
+                });
+            }
+
+            var error = Assert.ThrowsExactly<AutomationException>(() => SchematicProjectSkeleton.FromHierarchy(hierarchy));
+            Assert.AreEqual("conflicting_project_skeleton", error.Code);
         }
         finally { try { Directory.Delete(directory, true); } catch (IOException) { } }
     }

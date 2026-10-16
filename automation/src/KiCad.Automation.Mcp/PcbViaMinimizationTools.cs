@@ -93,13 +93,13 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_pcb_route_via_minimize_receipt", ReadOnly = true),
-     Description("Read the process-owned receipt for a via-minimization apply after a lost reply. The receipt is delegated to the shared checked route-replacement receipt store; it never resubmits geometry and does not replace a native cross-process receipt."),
+     Description("Read the durable receipt for a via-minimization apply after a lost reply or native process replacement. Supply expectedRequestJson from the original route apply when the epoch changed; the shared store validates exact request identity, never resubmits geometry and never performs a native receipt lookup during durable recovery."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and process-owned via-minimization receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Receipt(string instanceId, string expectedProcessEpoch, string operationId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string expectedRequestJson = "")
         => new PcbRouteOptimizationTools(registry).Receipt(
-            instanceId, expectedProcessEpoch, operationId, cancellationToken);
+            instanceId, expectedProcessEpoch, operationId, cancellationToken, expectedRequestJson);
 
     private static void ValidateViaApplyCreateRequest(string createRequestJson)
     {

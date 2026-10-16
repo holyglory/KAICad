@@ -1,5 +1,7 @@
 using System.Text.Json;
+using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common;
 using Kiapi.Board.Commands;
 using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
@@ -226,6 +228,139 @@ public sealed partial class PcbCheckedItemMigrationTests
                 "An unknown native outcome must be reconciled before another native dispatch.");
         }
         finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task RouteReceiptRecoversTerminalResultAfterNativeReplacementWithoutReceiptLookup()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-receipt-native-restart-terminal-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            string originalEpoch = Guid.NewGuid().ToString("D");
+            string replacementEpoch = Guid.NewGuid().ToString("D");
+            string operation = Guid.NewGuid().ToString("D");
+            RouteOptimizationReceiptRequest request = RecoveryRequest(root, instance, originalEpoch, operation);
+            using JsonDocument payload = JsonDocument.Parse($"{{\"instanceId\":\"{instance}\",\"processEpoch\":\"{originalEpoch}\",\"operationId\":\"{operation}\",\"outcome\":\"completed\",\"nativeReceiptAvailable\":true,\"replayed\":false,\"receipt\":{{\"replayed\":false}}}}");
+            new RouteOptimizationReceiptStore(root).Write(instance, originalEpoch, operation,
+                request.FingerprintSha256, payload.RootElement, request.Serialize());
+
+            var replacement = new RouteReplacementTransport(instance, replacementEpoch);
+            var registry = new InstanceRegistry(replacement, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), instance);
+
+            CallToolResult result = await new PcbRouteOptimizationTools(registry).Receipt(
+                instance, replacementEpoch, operation, default, request.Serialize());
+
+            JsonElement data = Success(result);
+            Assert.AreEqual(replacementEpoch, data.GetProperty("processEpoch").GetString());
+            Assert.AreEqual(originalEpoch, data.GetProperty("durableProcessEpoch").GetString());
+            Assert.IsTrue(data.GetProperty("durableRecovery").GetBoolean());
+            Assert.IsFalse(data.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsFalse(data.GetProperty("retryDispatched").GetBoolean());
+            Assert.AreEqual("terminal-receipt", data.GetProperty("retrySafety").GetString());
+            Assert.AreEqual(2, replacement.Handshakes,
+                "Attachment and recovery each verify the replacement process identity.");
+            Assert.AreEqual(0, replacement.UnexpectedCalls,
+                "Durable terminal recovery must not query or mutate the replacement native process.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task RouteReceiptRecoversUnknownAndAdmittedAfterNativeReplacementWithoutRetry()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-receipt-native-restart-unknown-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            string originalEpoch = Guid.NewGuid().ToString("D");
+            string replacementEpoch = Guid.NewGuid().ToString("D");
+            string operation = Guid.NewGuid().ToString("D");
+            RouteOptimizationReceiptRequest request = RecoveryRequest(root, instance, originalEpoch, operation);
+            var store = new RouteOptimizationReceiptStore(root);
+            store.WriteUnknown(instance, originalEpoch, operation, request.FingerprintSha256,
+                "operation_outcome_unknown", "The native route result was lost.", request.Serialize());
+
+            var replacement = new RouteReplacementTransport(instance, replacementEpoch);
+            var registry = new InstanceRegistry(replacement, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), instance);
+            CallToolResult unknown = await new PcbRouteOptimizationTools(registry).Receipt(
+                instance, replacementEpoch, operation, default, request.Serialize());
+
+            Assert.IsTrue(unknown.IsError ?? false, Text(unknown));
+            JsonElement unknownData = unknown.StructuredContent!.Value;
+            Assert.AreEqual("operation_outcome_unknown", unknownData.GetProperty("errorCode").GetString());
+            Assert.AreEqual(replacementEpoch, unknownData.GetProperty("processEpoch").GetString());
+            Assert.AreEqual(originalEpoch, unknownData.GetProperty("durableProcessEpoch").GetString());
+            Assert.IsFalse(unknownData.GetProperty("retryDispatched").GetBoolean());
+            Assert.IsFalse(unknownData.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.AreEqual(0, replacement.UnexpectedCalls);
+
+            string admittedOperation = Guid.NewGuid().ToString("D");
+            RouteOptimizationReceiptRequest admittedRequest = RecoveryRequest(root, instance, originalEpoch, admittedOperation);
+            store.WriteAdmitted(instance, originalEpoch, admittedOperation,
+                admittedRequest.FingerprintSha256, admittedRequest.Serialize());
+            CallToolResult admitted = await new PcbRouteOptimizationTools(registry).Receipt(
+                instance, replacementEpoch, admittedOperation, default, admittedRequest.Serialize());
+
+            Assert.IsTrue(admitted.IsError ?? false, Text(admitted));
+            JsonElement admittedData = admitted.StructuredContent!.Value;
+            Assert.AreEqual("operation_outcome_unknown", admittedData.GetProperty("errorCode").GetString());
+            Assert.AreEqual("admitted", admittedData.GetProperty("outcome").GetString());
+            Assert.IsFalse(admittedData.GetProperty("retryDispatched").GetBoolean());
+            Assert.AreEqual(3, replacement.Handshakes,
+                "Attachment and each recovery read verify the replacement process identity; neither outcome may perform a native receipt lookup.");
+            Assert.AreEqual(0, replacement.UnexpectedCalls);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static RouteOptimizationReceiptRequest RecoveryRequest(
+        string root, string instance, string processEpoch, string operationId)
+    {
+        DocumentLifecycleState state = State(root, processEpoch, 9, 'a');
+        var delete = new DeleteItems { Header = new() { Document = state.Document } };
+        delete.ItemIds.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
+        var track = Track(Guid.NewGuid().ToString("D"), 1_000, 2_000);
+        track.Net = new() { Name = "N1" };
+        var create = new CreateItems
+        {
+            Header = new() { Document = state.Document },
+            Items = { Any.Pack(track) }
+        };
+        return new RouteOptimizationReceiptRequest(instance, processEpoch, operationId,
+            BoardJson.Formatter.Format(delete), BoardJson.Formatter.Format(create),
+            SchematicJson.Formatter.Format(state), "");
+    }
+
+    private sealed class RouteReplacementTransport(string instanceId, string epoch) : INativeTransport
+    {
+        internal int Handshakes { get; private set; }
+        internal int UnexpectedCalls { get; private set; }
+
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] bytes, TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            var request = ApiRequest.Parser.ParseFrom(bytes);
+            if (request.Message.Is(GetAutomationSession.Descriptor))
+            {
+                Handshakes++;
+                return Task.FromResult(new ApiResponse
+                {
+                    Header = new() { KicadToken = epoch },
+                    Status = new() { Status = (ApiStatusCode)1 },
+                    Message = Any.Pack(new AutomationSession
+                    {
+                        ProtocolVersion = 1, InstanceId = instanceId,
+                        ProjectPath = "/fixture/route.kicad_pro", Epoch = epoch
+                    })
+                }.ToByteArray());
+            }
+
+            UnexpectedCalls++;
+            throw new InvalidOperationException("The replacement native process must not receive route lookup or mutation during durable recovery.");
+        }
     }
 
     private sealed class OfflineTransport : INativeTransport

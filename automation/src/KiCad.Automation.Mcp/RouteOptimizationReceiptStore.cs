@@ -14,7 +14,8 @@ internal sealed record RouteOptimizationReceiptRecord(
     [property: JsonPropertyName("operationId")] string OperationId,
     [property: JsonPropertyName("fingerprint")] string Fingerprint,
     [property: JsonPropertyName("resultJson")] string ResultJson,
-    [property: JsonPropertyName("replayObserved")] bool ReplayObserved = false)
+    [property: JsonPropertyName("replayObserved")] bool ReplayObserved = false,
+    [property: JsonPropertyName("requestJson")] string RequestJson = "")
 {
     internal void Validate()
     {
@@ -33,6 +34,17 @@ internal sealed record RouteOptimizationReceiptRecord(
                     "The route receipt result identity does not match its envelope.");
         }
         catch (JsonException error) { throw new AutomationException("invalid_route_receipt", error.Message); }
+
+        if (!string.IsNullOrWhiteSpace(RequestJson))
+        {
+            RouteOptimizationReceiptRequest request =
+                RouteOptimizationReceiptRequest.Parse(RequestJson);
+            if (request.InstanceId != InstanceId || request.ProcessEpoch != ProcessEpoch
+                || request.OperationId != OperationId
+                || request.FingerprintSha256 != Fingerprint)
+                throw new AutomationException("invalid_route_receipt",
+                    "The route receipt request identity does not match its envelope.");
+        }
     }
 
     private static bool Matches(JsonElement payload, string property, string expected) =>
@@ -43,6 +55,60 @@ internal sealed record RouteOptimizationReceiptRecord(
     private static bool Canonical(string value) => Guid.TryParseExact(value, "D", out var id)
         && id != Guid.Empty && value == id.ToString("D");
     private static bool Digest(string value) => value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
+}
+
+/// <summary>
+/// The exact route-replacement request retained alongside a durable receipt.
+/// The protobuf JSON members are canonicalized before this record is written;
+/// keeping them here lets a replacement native process validate the original
+/// request without contacting the old process or redispatching geometry.
+/// </summary>
+internal sealed record RouteOptimizationReceiptRequest(
+    [property: JsonPropertyName("instanceId")] string InstanceId,
+    [property: JsonPropertyName("processEpoch")] string ProcessEpoch,
+    [property: JsonPropertyName("operationId")] string OperationId,
+    [property: JsonPropertyName("deleteRequestJson")] string DeleteRequestJson,
+    [property: JsonPropertyName("createRequestJson")] string CreateRequestJson,
+    [property: JsonPropertyName("expectedStateJson")] string ExpectedStateJson,
+    [property: JsonPropertyName("drcJobStateJson")] string DrcJobStateJson = "")
+{
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
+
+    internal string FingerprintSha256 =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            InstanceId + "\n" + DeleteRequestJson + "\n" + CreateRequestJson + "\n"
+            + ExpectedStateJson + "\n" + DrcJobStateJson)));
+
+    internal string Serialize() => JsonSerializer.Serialize(this, Json);
+
+    internal void Validate()
+    {
+        if (!Canonical(InstanceId) || !Canonical(ProcessEpoch) || !Canonical(OperationId)
+            || string.IsNullOrWhiteSpace(DeleteRequestJson)
+            || string.IsNullOrWhiteSpace(CreateRequestJson)
+            || string.IsNullOrWhiteSpace(ExpectedStateJson))
+            throw new AutomationException("invalid_route_receipt", "The retained route request is incomplete.");
+    }
+
+    internal static RouteOptimizationReceiptRequest Parse(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            throw new AutomationException("invalid_route_receipt", "The original route request is required for process-restart recovery.");
+        try
+        {
+            var request = JsonSerializer.Deserialize<RouteOptimizationReceiptRequest>(json, Json)
+                ?? throw new AutomationException("invalid_route_receipt", "The retained route request is empty.");
+            request.Validate();
+            return request;
+        }
+        catch (AutomationException) { throw; }
+        catch (JsonException error)
+        { throw new AutomationException("invalid_route_receipt", "The retained route request is invalid: " + error.Message); }
+    }
+
+    private static bool Canonical(string value) => Guid.TryParseExact(value, "D", out var id)
+        && id != Guid.Empty && value == id.ToString("D");
 }
 
 internal sealed class RouteOptimizationReceiptStore
@@ -105,10 +171,10 @@ internal sealed class RouteOptimizationReceiptStore
     }
 
     internal void Write(string instanceId, string processEpoch, string operationId,
-        string fingerprint, JsonElement result)
+        string fingerprint, JsonElement result, string requestJson = "")
     {
         var record = new RouteOptimizationReceiptRecord(instanceId, processEpoch, operationId,
-            fingerprint, result.GetRawText(), ReplayObserved: false);
+            fingerprint, result.GetRawText(), ReplayObserved: false, RequestJson: requestJson);
         record.Validate();
         Directory.CreateDirectory(directory);
         WriteRecord(record, overwrite: true);
@@ -121,7 +187,7 @@ internal sealed class RouteOptimizationReceiptStore
     /// reconcile it instead of dispatching the same geometry a second time.
     /// </summary>
     internal void WriteUnknown(string instanceId, string processEpoch, string operationId,
-        string fingerprint, string errorCode, string errorMessage)
+        string fingerprint, string errorCode, string errorMessage, string requestJson = "")
     {
         if (string.IsNullOrWhiteSpace(errorCode) || string.IsNullOrWhiteSpace(errorMessage))
             throw new AutomationException("invalid_route_receipt", "An unknown route outcome requires an error code and message.");
@@ -138,7 +204,31 @@ internal sealed class RouteOptimizationReceiptStore
             replayed = false
         }, Json);
         var record = new RouteOptimizationReceiptRecord(instanceId, processEpoch, operationId,
-            fingerprint, payload.GetRawText(), ReplayObserved: false);
+            fingerprint, payload.GetRawText(), ReplayObserved: false, RequestJson: requestJson);
+        record.Validate();
+        Directory.CreateDirectory(directory);
+        WriteRecord(record, overwrite: true);
+    }
+
+    /// <summary>Persist an admission before contacting native.</summary>
+    internal void WriteAdmitted(string instanceId, string processEpoch, string operationId,
+        string fingerprint, string requestJson)
+    {
+        RouteOptimizationReceiptRequest request = RouteOptimizationReceiptRequest.Parse(requestJson);
+        if (request.InstanceId != instanceId || request.ProcessEpoch != processEpoch
+            || request.OperationId != operationId || request.FingerprintSha256 != fingerprint)
+            throw new AutomationException("invalid_route_receipt", "The admitted route request identity does not match its receipt envelope.");
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            instanceId, processEpoch, operationId,
+            outcome = "admitted",
+            nativeReceiptAvailable = false,
+            retrySafety = "unknown-native-outcome",
+            retryDispatched = false,
+            replayed = false
+        }, Json);
+        var record = new RouteOptimizationReceiptRecord(instanceId, processEpoch, operationId,
+            fingerprint, payload.GetRawText(), ReplayObserved: false, RequestJson: requestJson);
         record.Validate();
         Directory.CreateDirectory(directory);
         WriteRecord(record, overwrite: true);

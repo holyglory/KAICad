@@ -128,10 +128,10 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         // job's authoritative state and complete replacement payload. An MCP
         // cache or caller-supplied completion flags cannot establish admission.
         string canonicalDrc = drc is null ? "" : SchematicJson.Formatter.Format(new PcbDrcJobState { JobId = drc.JobId });
-        string fingerprint = instanceId + "\n" + canonicalDelete + "\n" + canonicalCreate + "\n"
-            + canonicalExpected + "\n" + canonicalDrc;
+        RouteOptimizationReceiptRequest receiptRequest = new(instanceId, expected.ProcessEpoch,
+            operationId, canonicalDelete, canonicalCreate, canonicalExpected, canonicalDrc);
         if (drc is not null)
-            return await WithNativeReceipt(instanceId, expected.ProcessEpoch, operationId, fingerprint, async () =>
+            return await WithNativeReceipt(receiptRequest, async () =>
             {
                 CheckedPcbRouteCommit checkedRequest = BuildCheckedRequest(
                     create, delete, expected, drc.JobId, operationId);
@@ -145,7 +145,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                     cancellationToken: cancellationToken);
                 return CheckedRouteResult(checkedResult, drc);
             });
-        return await WithNativeReceipt(instanceId, expected.ProcessEpoch, operationId, fingerprint, () =>
+        return await WithNativeReceipt(receiptRequest, () =>
             ApplyCornerChecked(instanceId, delete, create, expected, operationId, cancellationToken));
     });
 
@@ -170,31 +170,33 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             : Apply(instanceId, deleteRequestJson, createRequestJson, expectedStateJson, operationId, cancellationToken, drcJobStateJson);
 
     [McpServerTool(Name = "kicad_pcb_route_reroute_receipt", ReadOnly = true),
-     Description("Read the durable MCP-state receipt for a headless reroute apply after a lost reply. It never resubmits route geometry and does not replace a native cross-process receipt."),
+     Description("Read the durable MCP-state receipt for a headless reroute apply after a lost reply or native process replacement. Supply expectedRequestJson from the original route apply when the epoch changed; exact request identity is checked and recovery never resubmits geometry or performs a native receipt lookup."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and durable MCP-state route receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> RerouteReceipt(string instanceId, string expectedProcessEpoch, string operationId,
-        CancellationToken cancellationToken)
-        => Receipt(instanceId, expectedProcessEpoch, operationId, cancellationToken);
+        CancellationToken cancellationToken, string expectedRequestJson = "")
+        => Receipt(instanceId, expectedProcessEpoch, operationId, cancellationToken, expectedRequestJson);
 
     [McpServerTool(Name = "kicad_pcb_route_tune_receipt", ReadOnly = true),
-     Description("Read the durable MCP-state receipt for a DRC-gated PCB length/skew-tuning apply after a lost reply. It never resubmits geometry and does not replace a native cross-process receipt."),
+     Description("Read the durable MCP-state receipt for a DRC-gated PCB length/skew-tuning apply after a lost reply or native process replacement. Supply expectedRequestJson from the original route apply when the epoch changed; exact request identity is checked and recovery never resubmits geometry or performs a native receipt lookup."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and durable MCP-state route receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> TuneReceipt(string instanceId, string expectedProcessEpoch, string operationId,
-        CancellationToken cancellationToken)
-        => Receipt(instanceId, expectedProcessEpoch, operationId, cancellationToken);
+        CancellationToken cancellationToken, string expectedRequestJson = "")
+        => Receipt(instanceId, expectedProcessEpoch, operationId, cancellationToken, expectedRequestJson);
 
     [McpServerTool(Name = "kicad_pcb_route_corner_optimize_receipt", ReadOnly = true),
-     Description("Read the durable MCP-state receipt for a corner-optimization mutation after a lost reply. It never resubmits geometry and does not replace a native cross-process receipt."),
+     Description("Read the durable MCP-state receipt for a corner-optimization mutation after a lost reply or native process replacement. Supply expectedRequestJson from the original route apply when the epoch changed; exact request identity is checked and recovery never resubmits geometry or performs a native receipt lookup."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and durable MCP-state route receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Receipt(string instanceId, string expectedProcessEpoch, string operationId,
-        CancellationToken cancellationToken) => ExecuteMutation(async () =>
+        CancellationToken cancellationToken, string expectedRequestJson = "") => ExecuteMutation(async () =>
     {
         ValidateOperation(operationId);
         ValidateEpoch(expectedProcessEpoch);
         if (string.IsNullOrWhiteSpace(instanceId)) throw new AutomationException("invalid_instance_id", "instanceId is required to inspect a route-optimization receipt.");
+        RouteOptimizationReceiptRequest? expectedRequest = string.IsNullOrWhiteSpace(expectedRequestJson)
+            ? null : RouteOptimizationReceiptRequest.Parse(expectedRequestJson);
         await MutationGate.WaitAsync(cancellationToken);
         try
         {
@@ -203,6 +205,64 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             if (stored is null)
                 return ReceiptData(new { instanceId, processEpoch = expectedProcessEpoch, operationId, found = false,
                     receiptScope = "mcp-state", nativeReceiptAvailable = false });
+            if (expectedRequest is not null)
+            {
+                if (expectedRequest.InstanceId != instanceId || expectedRequest.OperationId != operationId
+                    || expectedRequest.ProcessEpoch != stored.ProcessEpoch
+                    || expectedRequest.FingerprintSha256 != stored.Fingerprint)
+                    throw new AutomationException("operation_id_reused", "The original route request does not match the durable receipt identity.");
+                if (!string.IsNullOrWhiteSpace(stored.RequestJson)
+                    && !string.Equals(RouteOptimizationReceiptRequest.Parse(stored.RequestJson).Serialize(),
+                        expectedRequest.Serialize(), StringComparison.Ordinal))
+                    throw new AutomationException("operation_id_reused", "The original route request differs from the durable receipt request.");
+            }
+
+            bool sameProcessEpoch = string.Equals(stored.ProcessEpoch, expectedProcessEpoch, StringComparison.Ordinal);
+            if (!sameProcessEpoch)
+            {
+                if (expectedRequest is null || string.IsNullOrWhiteSpace(stored.RequestJson))
+                    throw new AutomationException("stale_process_epoch", "The original route request is required to recover a receipt after native process replacement.");
+
+                NativeClient replacement = registry.Client(instanceId);
+                AutomationSession replacementSession = await replacement.HandshakeAsync(cancellationToken);
+                if (replacementSession.InstanceId != instanceId || replacementSession.Epoch != expectedProcessEpoch)
+                    throw new AutomationException("stale_process_epoch", "The current native process epoch does not match the recovery request.");
+
+                JsonElement recoveredPayload = (stored.ReplayObserved
+                    ? RouteOptimizationReceiptStore.ReplayResult(stored)
+                    : RouteOptimizationReceiptStore.Result(stored)).StructuredContent!.Value;
+                string recoveredOutcome = recoveredPayload.TryGetProperty("outcome", out JsonElement recoveredOutcomeValue)
+                    && recoveredOutcomeValue.ValueKind == JsonValueKind.String
+                    ? recoveredOutcomeValue.GetString()! : "completed";
+                if (recoveredOutcome is "unknown" or "admitted")
+                {
+                    JsonElement unknown = JsonSerializer.SerializeToElement(new
+                    {
+                        instanceId, processEpoch = expectedProcessEpoch,
+                        durableProcessEpoch = stored.ProcessEpoch, operationId, found = true,
+                        receiptScope = "mcp-state", outcome = recoveredOutcome,
+                        retrySafety = "unknown-native-outcome", nativeReceiptAvailable = false,
+                        retryDispatched = false,
+                        errorCode = recoveredPayload.TryGetProperty("errorCode", out JsonElement errorCode)
+                            ? errorCode.GetString() : "operation_outcome_unknown",
+                        errorMessage = recoveredPayload.TryGetProperty("errorMessage", out JsonElement errorMessage)
+                            ? errorMessage.GetString() : "The route operation has no terminal native receipt; inspect the board before retrying."
+                    });
+                    return new CallToolResult { IsError = true, StructuredContent = unknown,
+                        Content = [new TextContentBlock { Text = unknown.GetRawText() }] };
+                }
+
+                return ReceiptData(new
+                {
+                    instanceId, processEpoch = expectedProcessEpoch,
+                    durableProcessEpoch = stored.ProcessEpoch, operationId, found = true,
+                    receiptScope = "mcp-state", outcome = recoveredOutcome,
+                    retrySafety = "terminal-receipt", nativeReceiptAvailable = false,
+                    durableRecovery = true, retryDispatched = false,
+                    receipt = recoveredPayload
+                });
+            }
+
             JsonElement payload = (stored.ReplayObserved
                 ? RouteOptimizationReceiptStore.ReplayResult(stored)
                 : RouteOptimizationReceiptStore.Result(stored)).StructuredContent!.Value;
@@ -221,7 +281,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                 receiptScope = "mcp-state",
                 outcome,
                 retrySafety = outcome == "unknown" ? "unknown-native-outcome" : "terminal",
-                nativeReceiptAvailable, receipt = payload });
+                nativeReceiptAvailable, retryDispatched = false, receipt = payload });
         }
         finally { MutationGate.Release(); }
     });
@@ -615,23 +675,24 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         }
     }
 
-    private async Task<CallToolResult> WithNativeReceipt(string instanceId, string processEpoch,
-        string operationId, string fingerprint,
+    private async Task<CallToolResult> WithNativeReceipt(RouteOptimizationReceiptRequest receiptRequest,
         Func<Task<CallToolResult>> action)
     {
         await MutationGate.WaitAsync();
         try
         {
             var store = new RouteOptimizationReceiptStore(registry.StateDirectory);
-            using var lease = store.Acquire(instanceId, operationId);
-            string digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprint)));
-            if (store.Read(instanceId, operationId) is { } existing)
+            using var lease = store.Acquire(receiptRequest.InstanceId, receiptRequest.OperationId);
+            string digest = receiptRequest.FingerprintSha256;
+            string requestJson = receiptRequest.Serialize();
+            if (store.Read(receiptRequest.InstanceId, receiptRequest.OperationId) is { } existing)
             {
                 if (existing.Fingerprint != digest)
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different route replacement request.");
                 JsonElement stored = JsonDocument.Parse(existing.ResultJson).RootElement;
                 if (stored.TryGetProperty("outcome", out JsonElement outcome)
-                    && string.Equals(outcome.GetString(), "unknown", StringComparison.Ordinal))
+                    && outcome.ValueKind == JsonValueKind.String
+                    && outcome.GetString() is "unknown" or "admitted")
                 {
                     return new CallToolResult
                     {
@@ -648,14 +709,15 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                 && errorPayload.TryGetProperty("errorCode", out JsonElement errorCode)
                 && string.Equals(errorCode.GetString(), "operation_outcome_unknown", StringComparison.Ordinal))
             {
-                store.WriteUnknown(instanceId, processEpoch, operationId, digest,
+                store.WriteUnknown(receiptRequest.InstanceId, receiptRequest.ProcessEpoch, receiptRequest.OperationId, digest,
                     errorCode.GetString()!, errorPayload.TryGetProperty("errorMessage", out JsonElement message)
                         ? message.GetString() ?? "Native route outcome is unknown."
-                        : "Native route outcome is unknown.");
+                        : "Native route outcome is unknown.", requestJson);
             }
             else if (!(result.IsError ?? false) && result.StructuredContent is JsonElement payload)
-                store.Write(instanceId, payload.TryGetProperty("processEpoch", out var epoch) ? epoch.GetString()! : "",
-                    operationId, digest, payload);
+                store.Write(receiptRequest.InstanceId,
+                    payload.TryGetProperty("processEpoch", out var epoch) ? epoch.GetString()! : receiptRequest.ProcessEpoch,
+                    receiptRequest.OperationId, digest, payload, requestJson);
             return result;
         }
         finally { MutationGate.Release(); }

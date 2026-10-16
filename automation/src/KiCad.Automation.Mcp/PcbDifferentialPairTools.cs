@@ -107,13 +107,13 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_diff_pair_receipt", ReadOnly = true),
-     Description("Read the process-owned receipt for a differential-pair apply after a lost reply. This delegates to the checked route receipt store, never resubmits geometry and does not replace a native cross-process receipt."),
+     Description("Read the durable receipt for a differential-pair apply after a lost reply or native process replacement. Supply expectedRequestJson from the original route apply when the epoch changed; the tool validates exact request identity, never resubmits geometry and never performs a native receipt lookup during durable recovery."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and process-owned differential-pair receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Receipt(string instanceId, string expectedProcessEpoch, string operationId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string expectedRequestJson = "")
         => new PcbRouteOptimizationTools(registry).Receipt(
-            instanceId, expectedProcessEpoch, operationId, cancellationToken);
+            instanceId, expectedProcessEpoch, operationId, cancellationToken, expectedRequestJson);
 
     [McpServerTool(Name = "kicad_pcb_diff_pair_validate", ReadOnly = true),
      Description("Validate one matched connected straight-track differential-pair route per net at one lifecycle checkpoint. requestJson contains positiveNet, negativeNet, widthNm, minimumGapNm, optional targetGapNm, maxSkewNm, toleranceNm, parallelTolerance and netClassName. The validator reports polyline lengths, skew, copper edge gap, endpoint correspondence, layer agreement and per-segment parallelism. Arcs, vias, disconnected or branched routes, and unknown geometry are explicit incomplete results; the tool never mutates the board or claims DRC, impedance or manufacturing validity."),

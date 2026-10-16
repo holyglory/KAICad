@@ -57,6 +57,14 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeSchematicHierarchy")]
     public Task TypedSchematicHierarchyAuthoringPersistsThroughMcp() => RunNativeSessions(NativeJourney.SchematicHierarchy);
 
+    [TestMethod, TestCategory("NativeSchematicConnection")]
+    public Task TypedSchematicConnectionsPersistThroughMcp()
+    {
+        if (Environment.GetEnvironmentVariable("KICAD_SCHEMATIC_CONNECTIONS_ONLY") != "1")
+            Assert.Inconclusive("Set KICAD_SCHEMATIC_CONNECTIONS_ONLY=1 to run the bounded native typed connection lane.");
+        return RunNativeSessions(NativeJourney.SchematicConnections);
+    }
+
     [TestMethod, TestCategory("NativeOffscreenConnectedMove")]
     public Task OffscreenConnectedMovesPreserveTheVisibleEditor() => RunNativeSessions(NativeJourney.OffscreenMove);
 
@@ -168,7 +176,7 @@ public sealed partial class NativeSessionTests
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbDrcRefill, PcbDrcParity, PcbConnectivity, PcbViaMinimization, PcbDifferentialPair, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata, SchematicExport, SchematicCrossProbe, SchematicHierarchy }
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata, SchematicExport, SchematicCrossProbe, SchematicHierarchy, SchematicConnections }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -189,6 +197,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.SchematicExport => "native-schematic-export",
                 NativeJourney.SchematicCrossProbe => "native-schematic-cross-probe",
                 NativeJourney.SchematicHierarchy => "native-schematic-metadata",
+                NativeJourney.SchematicConnections => "native-schematic-connections",
                 NativeJourney.OffscreenMove => "native-offscreen-move",
                 NativeJourney.TransformSync => "native-transform-sync",
                 NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
@@ -233,6 +242,7 @@ public sealed partial class NativeSessionTests
             NativeJourney.SchematicExport => nameof(NativeSchematicSvgExportUsesRealContentAndPreservesState),
             NativeJourney.SchematicCrossProbe => nameof(NativeSchematicCrossProbeBindsLifecycleAndPreservesDesign),
             NativeJourney.SchematicHierarchy => nameof(TypedSchematicHierarchyAuthoringPersistsThroughMcp),
+            NativeJourney.SchematicConnections => nameof(TypedSchematicConnectionsPersistThroughMcp),
             _ => ""
         };
         string evidence = caseIdentity.Length == 0 ? NativeEvidenceDirectory.Begin(evidenceRoot)
@@ -710,6 +720,9 @@ public sealed partial class NativeSessionTests
                             evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.SchematicHierarchy)
                         await VerifyNativeSchematicHierarchy(client, opened.Document, hierarchyFixture, focusProcessId,
+                            ":" + displayNumber, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.SchematicConnections)
+                        await VerifyNativeSchematicConnections(client, opened.Document, focusProcessId,
                             ":" + displayNumber, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.RasterTrace)
                         await VerifyNativeRasterTrace(client, evidence, target.Id, deadline.Token);

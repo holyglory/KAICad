@@ -29,5 +29,7 @@ public static class WindowsUpdateRecoveryCommand
     }
 
     internal static int ExitCode(WindowsUpdateRecoveryResult result) =>
-        result.NativeEditorRestarted || result.Status is "restored" or "original_running" or "attempt_already_recorded" ? 0 : 1;
+        result.NativeEditorRestarted || result.Status is "restored" or "original_running" or "attempt_already_recorded" ? 0
+        : result.Status == "recovery_cancelled" ? 2
+        : 1;
 }

@@ -78,6 +78,7 @@ public sealed class UpdateRecoveryTests
     [DataRow("attempt_not_current", false, true, 1)]
     [DataRow("operation_unavailable", false, true, 1)]
     [DataRow("launch_failed", false, false, 1)]
+    [DataRow("recovery_cancelled", false, false, 2)]
     [DataRow("unexpected", true, false, 0)]
     public void RecoveryCommandExitCodeDoesNotTreatStaleAttemptsAsSuccess(
         string status, bool nativeEditorRestarted, bool reused, int expected)

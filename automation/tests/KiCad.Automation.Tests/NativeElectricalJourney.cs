@@ -13,7 +13,7 @@ public sealed partial class NativeSessionTests
 {
     internal sealed record ElectricalFixture(string Contents, string Symbol, string Wire, string PinA, string PinB);
 
-    internal static ElectricalFixture MakeElectricalFixture(string rootId)
+    internal static ElectricalFixture MakeElectricalFixture(string rootId, bool includeFootprint = false)
     {
         string a = Guid.NewGuid().ToString("D"), b = Guid.NewGuid().ToString("D");
         string pinA = Guid.NewGuid().ToString("D"), pinB = Guid.NewGuid().ToString("D");
@@ -53,6 +53,7 @@ public sealed partial class NativeSessionTests
               (in_bom yes) (on_board yes) (dnp no) (uuid {{id}})
               (property "Reference" "{{reference}}" (at {{x}} 75 0) (effects (font (size 1.27 1.27))))
               (property "Value" "Probe" (at {{x}} 73 0) (effects (font (size 1.27 1.27))))
+              {{(includeFootprint ? $"(property \"Footprint\" \"DrcJourney:DrcJourneyPart\" (at {x} 71 0) (effects (font (size 1.27 1.27))))" : "")}}
               (pin "1" (uuid {{pin}}))
               (instances (project "fixture" (path "/{{rootId}}" (reference "{{reference}}") (unit 1)))))
             """;

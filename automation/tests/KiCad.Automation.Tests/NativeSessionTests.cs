@@ -83,6 +83,17 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativePcbDrc")]
     public Task NativePcbDrcRefillUsesDetachedInputsThroughMcp() => RunNativeSessions(NativeJourney.PcbDrcRefill);
 
+    // Opt-in focused lane: this exercises the complete live MCP request with
+    // testFootprints=true without adding another native job to the normal DRC
+    // qualification cadence.
+    [TestMethod, TestCategory("NativePcbDrcParity")]
+    public Task NativePcbDrcSchematicParityUsesMcp()
+    {
+        if (Environment.GetEnvironmentVariable("KICAD_DRC_PARITY_ONLY") != "1")
+            Assert.Inconclusive("Set KICAD_DRC_PARITY_ONLY=1 to run the bounded native MCP schematic-parity lane.");
+        return RunNativeSessions(NativeJourney.PcbDrcParity);
+    }
+
     [TestMethod, TestCategory("NativePcbItems")]
     public Task NativePcbConnectivityQueryUsesTypedNativeSummaries() => RunNativeSessions(NativeJourney.PcbConnectivity);
 
@@ -155,7 +166,7 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeComponentRebind")]
     public Task NativeComponentReplacementKeepsExactInstructionsAndHistory() => RunNativeSessions(NativeJourney.ComponentRebind);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbDrcRefill, PcbConnectivity, PcbViaMinimization, PcbDifferentialPair, CrossProbe,
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbDrcRefill, PcbDrcParity, PcbConnectivity, PcbViaMinimization, PcbDifferentialPair, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
         ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata, SchematicExport, SchematicCrossProbe, SchematicHierarchy }
 
@@ -187,6 +198,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
                 NativeJourney.PcbDrcRefill => "native-net-settings",
+                NativeJourney.PcbDrcParity => "native-pcb-drc-parity",
                 NativeJourney.PcbConnectivity => "native-pcb-items",
                 NativeJourney.PcbViaMinimization => "native-pcb-items",
                 NativeJourney.PcbDifferentialPair => "native-pcb-items",
@@ -212,6 +224,7 @@ public sealed partial class NativeSessionTests
         {
             NativeJourney.PcbItems => nameof(NativePcbItemsAreCreatedAndUpdatedThroughMcp),
             NativeJourney.PcbDrcRefill => nameof(NativePcbDrcRefillUsesDetachedInputsThroughMcp),
+            NativeJourney.PcbDrcParity => nameof(NativePcbDrcSchematicParityUsesMcp),
             NativeJourney.PcbConnectivity => nameof(NativePcbConnectivityQueryUsesTypedNativeSummaries),
             NativeJourney.PcbViaMinimization => nameof(NativePcbViaMinimizationAppliesCheckedReplacementThroughMcp),
             NativeJourney.PcbDifferentialPair => nameof(NativeDifferentialPairApplyConnectsBothPadPairsThroughMcp),
@@ -257,7 +270,7 @@ public sealed partial class NativeSessionTests
             // prior 450s default therefore cancelled during the second editor;
             // retain per-action limits and give this two-editor journey 900s.
             : journey == NativeJourney.NetSettings ? 900
-            : journey == NativeJourney.PcbDrcRefill ? 600
+            : journey is NativeJourney.PcbDrcRefill or NativeJourney.PcbDrcParity ? 600
             : journey == NativeJourney.ProjectRecovery ? 2400 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
@@ -296,7 +309,7 @@ public sealed partial class NativeSessionTests
             {
                 string id = Guid.NewGuid().ToString("D");
                 string projectDirectory = Path.Combine(temporary, index.ToString());
-                if (journey == NativeJourney.NetSettings)
+                if (journey is NativeJourney.NetSettings or NativeJourney.PcbDrcParity)
                     projectDirectory = Path.Combine(projectDirectory, "電源");
                 Directory.CreateDirectory(projectDirectory);
                 if (journey is NativeJourney.PcbItems or NativeJourney.PcbConnectivity)
@@ -324,7 +337,7 @@ public sealed partial class NativeSessionTests
                     }
                 }), deadline.Token);
                 // KiCad reads a project's footprint library table only when it loads the project.
-                if (journey == NativeJourney.NetSettings)
+                if (journey is NativeJourney.NetSettings or NativeJourney.PcbDrcParity)
                     await WritePcbDrcJourneyLibrary(projectDirectory, deadline.Token);
                 string socket = Path.Combine(projectDirectory, "api.sock");
                 var start = new ProcessStartInfo(executable)
@@ -430,7 +443,7 @@ public sealed partial class NativeSessionTests
                 string rootScreenId = Guid.NewGuid().ToString("D");
                 Assert.AreNotEqual(rootId, rootScreenId, "Exercise distinct project-instance and file-screen identities.");
                 string textId = Guid.NewGuid().ToString("D");
-                var electrical = MakeElectricalFixture(rootId);
+                var electrical = MakeElectricalFixture(rootId, includeFootprint: journey == NativeJourney.PcbDrcParity);
                 var hierarchyFixture = await MakeHierarchyFixture(rootId, Path.GetDirectoryName(schematic)!, deadline.Token);
                 string fixtureText = journey == NativeJourney.SchematicExport
                     ? "Native schematic export fixture " + textId
@@ -652,6 +665,8 @@ public sealed partial class NativeSessionTests
                         await VerifyNativePcbItems(client, opened.Document, evidence, target.Id, focusProcessId, ":" + displayNumber, deadline.Token);
                     else if (journey == NativeJourney.PcbDrcRefill)
                         await VerifyNativePcbDrcRefill(client, opened.Document, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.PcbDrcParity)
+                        await VerifyNativePcbDrcParity(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.PcbConnectivity)
                         await VerifyNativePcbConnectivity(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.PcbViaMinimization)

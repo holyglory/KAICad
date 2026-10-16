@@ -1,5 +1,6 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
+using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -114,6 +115,17 @@ public sealed partial class NativeSessionTests
     private static async Task VerifyNativePcbItems(NativeClient client, DocumentSpecifier schematic,
         string evidence, string instanceId, int focusProcessId, string display, CancellationToken token)
     {
+        // This isolated process-loss journey is deliberately opt-in.  It uses
+        // the same CleanRouteBoard fixture and route-plan/DRC boundary as the
+        // normal PCB-items lane, but owns disposable KiCad processes so the
+        // surrounding native editor is never killed.  Keep it before all
+        // ordinary fixture setup so KICAD_ROUTE_RESTART_ONLY=1 is cheap and
+        // deterministic when run as a focused qualification case.
+        if (Environment.GetEnvironmentVariable("KICAD_ROUTE_RESTART_ONLY") == "1")
+        {
+            await VerifyNativeRouteRestart(display, evidence, token);
+            return;
+        }
         string boardPath = Path.Combine(schematic.Project.Path, schematic.Project.Name + ".kicad_pcb");
         // The isolated native fixture has no global fp-lib-table.  Install one
         // project-local resistor library from the repository so this positive
@@ -4639,6 +4651,340 @@ public sealed partial class NativeSessionTests
             expectedVia.Parent = null; actualVia.Parent = null;
             expectedVia.Net.Code = null; actualVia.Net.Code = null;
             Assert.AreEqual(expectedVia, actualVia, "Persisted via state changed.");
+        }
+    }
+
+    // Ledger p4c9f3d6efc6c9cc.  A route replacement is admitted through the
+    // compiled MCP server, then the disposable native peer is stopped before
+    // that request can be answered and killed.  Reconnecting the same MCP
+    // instance to a new native epoch must expose the durable unknown receipt,
+    // never redispatch the route, and reopen the board without duplicate
+    // geometry.  This is opt-in through KICAD_ROUTE_RESTART_ONLY and is kept
+    // separate from the ordinary NativePcbItems editor journey.
+    private static async Task VerifyNativeRouteRestart(string display, string evidence, CancellationToken token)
+    {
+        string root = FindRoot();
+        string executable = Path.Combine(root, "automation", "artifacts", "native", "kicad", "kicad");
+        Assert.IsTrue(File.Exists(executable), "The linked native manager must be built first.");
+        string scratch = Directory.CreateTempSubdirectory("kicad-route-restart-").FullName;
+        string projectDirectory = Directory.CreateDirectory(Path.Combine(scratch, "project")).FullName;
+        string project = Path.Combine(projectDirectory, "restart.kicad_pro");
+        string boardPath = Path.Combine(projectDirectory, "restart.kicad_pcb");
+        string socket = Path.Combine(scratch, "api.sock");
+        string mcpState = Path.Combine(scratch, "mcp-state");
+        string instanceId = Guid.NewGuid().ToString("D");
+        string operationId = Guid.NewGuid().ToString("D");
+        var captures = new List<Task>();
+        Process? native = null;
+        Process? replacement = null;
+
+        Process StartNative(string logName)
+        {
+            var start = new ProcessStartInfo(executable)
+            {
+                WorkingDirectory = projectDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            start.Environment["DISPLAY"] = display;
+            start.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
+            start.Environment["XDG_CONFIG_HOME"] = Path.Combine(scratch, "config");
+            start.Environment["XDG_CACHE_HOME"] = Path.Combine(scratch, "cache");
+            foreach (string argument in new[] { "--new", "--automation", instanceId, "--api-socket", socket,
+                "--automation-log", Path.Combine(evidence, logName), "--software-rendering", project })
+                start.ArgumentList.Add(argument);
+            var process = Process.Start(start)!;
+            captures.Add(Capture(process.StandardOutput, Path.Combine(evidence, logName + ".stdout.log")));
+            captures.Add(Capture(process.StandardError, Path.Combine(evidence, logName + ".stderr.log")));
+            return process;
+        }
+
+        async Task<NativeClient> Connect(Process process)
+        {
+            var client = new NativeClient(new NngTransport(), "ipc://" + socket);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(60));
+            while (true)
+            {
+                limit.Token.ThrowIfCancellationRequested();
+                Assert.IsFalse(process.HasExited, "The disposable KiCad process exited before serving route requests.");
+                try { await client.HandshakeAsync(limit.Token); return client; }
+                catch (NngException) { }
+                catch (NativeApiException error) when (error.Status is 4 or 7) { }
+                await Task.Delay(100, limit.Token);
+            }
+        }
+
+        static string Text(JsonElement result) => result.GetProperty("content").EnumerateArray()
+            .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!;
+
+        try
+        {
+            await File.WriteAllTextAsync(project, "{\"meta\":{\"version\":3}}\n", token);
+            await File.WriteAllTextAsync(boardPath, CleanRouteBoard(), token);
+            byte[] savedBoard = await File.ReadAllBytesAsync(boardPath, token);
+
+            native = StartNative("pcb-route-restart-old-native.log");
+            NativeClient client = await Connect(native);
+            string oldEpoch = client.Epoch;
+            DocumentSpecifier board = (await client.OpenRootBoardAsync(boardPath, token)).Document;
+            DocumentLifecycleState baseline = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = board }, token);
+            var beforeRoutes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            {
+                Header = new() { Document = board },
+                Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia }
+            }, token);
+            string[] beforeRouteIds = beforeRoutes.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray();
+            string[] beforeRouteShapes = beforeRoutes.Items.Select(RouteShape).Order(StringComparer.Ordinal).ToArray();
+            Assert.IsGreaterThan(0, beforeRouteIds.Length, "The shared clean route fixture must contain copper to protect from duplication.");
+
+            // Keep the MCP admission state in one directory across both
+            // process epochs.  All planning and detached DRC work completes
+            // before the native peer is paused; only the exact apply request is
+            // left in flight when SIGKILL is delivered.
+            await using (var firstMcp = await CancellableMcpClient.StartAsync(
+                mcpState, Path.Combine(evidence, "pcb-route-restart-first-mcp.stderr.log"), token))
+            {
+                RequireToolSuccess(await firstMcp.Tool("kicad_instance_attach",
+                    new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                JsonElement plan = await firstMcp.Tool("kicad_pcb_route_plan", new
+                {
+                    instanceId,
+                    documentJson = SchematicJson.Formatter.Format(board),
+                    expectedStateJson = SchematicJson.Formatter.Format(baseline),
+                    requestJson = JsonSerializer.Serialize(new
+                    {
+                        netName = "POWER_RAIL",
+                        start = new { xNm = 30_100_000L, yNm = 30_100_000L },
+                        end = new { xNm = 30_500_000L, yNm = 30_500_000L },
+                        layer = "F.Cu", widthNm = 250_000L, clearanceNm = 100_000L,
+                        gridNm = 100_000L,
+                        bounds = new { minXNm = 29_000_000L, minYNm = 29_000_000L,
+                            maxXNm = 31_000_000L, maxYNm = 31_000_000L },
+                        includeFootprintEnvelopes = true, includeRipUpCandidate = true,
+                        maxNodes = 10_000
+                    })
+                });
+                RequireToolSuccess(plan);
+                JsonElement planData = plan.GetProperty("structuredContent");
+                Assert.IsTrue(planData.GetProperty("routeFound").GetBoolean(), plan.GetRawText());
+                Assert.IsGreaterThan(0, planData.GetProperty("ripUpItemIds").GetArrayLength(), plan.GetRawText());
+                string candidateJson = planData.GetProperty("candidateRequestJson").GetString()!;
+                string deleteJson = planData.GetProperty("ripUpCandidateRequestJson").GetString()!;
+
+                JsonElement drcReply = await firstMcp.Tool("kicad_pcb_drc_start", new
+                {
+                    instanceId,
+                    documentJson = SchematicJson.Formatter.Format(board),
+                    operationId = Guid.NewGuid().ToString("D"),
+                    refillZones = false,
+                    reportAllTrackErrors = true,
+                    testFootprints = false,
+                    expectedRevisionJson = SchematicJson.Formatter.Format(baseline.Revision),
+                    processEpoch = oldEpoch,
+                    candidateRequestJson = candidateJson,
+                    deleteRequestJson = deleteJson
+                });
+                RequireToolSuccess(drcReply);
+                PcbDrcJobState drc = SchematicJson.Parser.Parse<PcbDrcJobState>(Text(drcReply));
+                for (int attempt = 0; attempt < 120 && !drc.WorkerFinished; attempt++)
+                {
+                    await Task.Delay(100, token);
+                    JsonElement update = await firstMcp.Tool("kicad_pcb_drc_job", new
+                    {
+                        instanceId,
+                        documentJson = SchematicJson.Formatter.Format(board),
+                        jobId = drc.JobId,
+                        processEpoch = oldEpoch,
+                        candidateRequestJson = candidateJson,
+                        deleteRequestJson = deleteJson
+                    });
+                    RequireToolSuccess(update);
+                    drc = SchematicJson.Parser.Parse<PcbDrcJobState>(Text(update));
+                }
+                Assert.IsTrue(drc.WorkerFinished, SchematicJson.Formatter.Format(drc));
+                Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, drc.Status, SchematicJson.Formatter.Format(drc));
+                Assert.IsTrue(drc.ResultsFresh, SchematicJson.Formatter.Format(drc));
+                Assert.IsTrue(drc.SnapshotComplete, SchematicJson.Formatter.Format(drc));
+                Assert.IsTrue(drc.CandidatePayloadVerified, SchematicJson.Formatter.Format(drc));
+                Assert.IsEmpty(drc.Findings, SchematicJson.Formatter.Format(drc));
+
+                var applyArguments = new
+                {
+                    instanceId,
+                    deleteRequestJson = deleteJson,
+                    createRequestJson = candidateJson,
+                    expectedStateJson = SchematicJson.Formatter.Format(baseline),
+                    operationId,
+                    drcJobStateJson = SchematicJson.Formatter.Format(drc)
+                };
+                var requestOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+                string originalRequestJson = JsonSerializer.Serialize(new
+                {
+                    instanceId,
+                    processEpoch = oldEpoch,
+                    operationId,
+                    deleteRequestJson = deleteJson,
+                    createRequestJson = candidateJson,
+                    expectedStateJson = SchematicJson.Formatter.Format(baseline),
+                    drcJobStateJson = SchematicJson.Formatter.Format(drc)
+                }, requestOptions);
+
+                int settledSockets = await firstMcp.SettledSocketCount(token);
+                Assert.AreEqual(0, SignalProcess(native.Id, SigStop), "The disposable KiCad process could not be paused.");
+                await WaitUntil(() => ProcessState(native.Id) == 'T', "the disposable KiCad process to pause", token);
+                var pending = firstMcp.StartTool("kicad_pcb_route_reroute_apply", applyArguments);
+                await WaitUntil(() => firstMcp.SocketCount() > settledSockets,
+                    "the route replacement request to reach the paused native process", token);
+                Assert.IsFalse(pending.Reply.IsCompleted, "The paused native process answered a route replacement.");
+                Assert.AreEqual(0, SignalProcess(native.Id, 9), "The disposable KiCad process could not be killed.");
+                await native.WaitForExitAsync(token);
+                JsonElement lost = await pending.Reply.WaitAsync(TimeSpan.FromSeconds(60), token);
+                await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-route-restart-lost-apply.json"),
+                    lost.GetRawText(), token);
+                JsonElement lostResult = lost.GetProperty("result");
+                Assert.IsTrue(lostResult.GetProperty("isError").GetBoolean(), lost.GetRawText());
+                string lostCode = lostResult.GetProperty("structuredContent").GetProperty("errorCode").GetString()!;
+                Assert.IsTrue(lostCode is "instance_exited" or "operation_outcome_unknown", lost.GetRawText());
+                await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-route-restart-original-request.json"),
+                    originalRequestJson, token);
+
+                // The request string is retained for the reconnect receipt
+                // call below; this local variable also makes the exact request
+                // boundary explicit in the evidence-producing test.
+                _ = originalRequestJson;
+            }
+
+            if (File.Exists(socket)) File.Delete(socket);
+            replacement = StartNative("pcb-route-restart-replacement-native.log");
+            NativeClient replacementClient = await Connect(replacement);
+            Assert.AreNotEqual(oldEpoch, replacementClient.Epoch,
+                "The replacement native process must have a new epoch.");
+            DocumentSpecifier replacementBoard = (await replacementClient.OpenRootBoardAsync(boardPath, token)).Document;
+            Assert.AreEqual(board, replacementBoard,
+                "The replacement must reopen the same explicit PCB document.");
+
+            await using (var reconnectMcp = await CancellableMcpClient.StartAsync(
+                mcpState, Path.Combine(evidence, "pcb-route-restart-reconnect-mcp.stderr.log"), token))
+            {
+                RequireToolSuccess(await reconnectMcp.Tool("kicad_instance_attach",
+                    new { endpoint = replacementClient.Endpoint, expectedInstanceId = instanceId }));
+                // Reconstruct the exact retained request from the native
+                // board state and the DRC-bound candidate.  The receipt tool
+                // canonicalizes it before comparing the durable fingerprint.
+                var replacementState = await replacementClient.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                    new() { Document = replacementBoard }, token);
+                JsonElement replacementPlan = await reconnectMcp.Tool("kicad_pcb_route_plan", new
+                {
+                    instanceId,
+                    documentJson = SchematicJson.Formatter.Format(replacementBoard),
+                    expectedStateJson = SchematicJson.Formatter.Format(replacementState),
+                    requestJson = JsonSerializer.Serialize(new
+                    {
+                        netName = "POWER_RAIL",
+                        start = new { xNm = 30_100_000L, yNm = 30_100_000L },
+                        end = new { xNm = 30_500_000L, yNm = 30_500_000L },
+                        layer = "F.Cu", widthNm = 250_000L, clearanceNm = 100_000L,
+                        gridNm = 100_000L,
+                        bounds = new { minXNm = 29_000_000L, minYNm = 29_000_000L,
+                            maxXNm = 31_000_000L, maxYNm = 31_000_000L },
+                        includeFootprintEnvelopes = true, includeRipUpCandidate = true,
+                        maxNodes = 10_000
+                    })
+                });
+                // The plan itself is read-only and serves only to recover the
+                // exact candidate/delete payloads for receipt identity; it
+                // must never be used to redispatch the lost operation.
+                RequireToolSuccess(replacementPlan);
+                JsonElement replacementPlanData = replacementPlan.GetProperty("structuredContent");
+                Assert.IsTrue(replacementPlanData.GetProperty("routeFound").GetBoolean(), replacementPlan.GetRawText());
+                string candidateJson = replacementPlanData.GetProperty("candidateRequestJson").GetString()!;
+                string deleteJson = replacementPlanData.GetProperty("ripUpCandidateRequestJson").GetString()!;
+                // The original DRC payload is part of the operation identity.
+                // Reusing a deterministic fixture and a fresh plan is not
+                // sufficient to recover it, so use the durable request saved
+                // immediately before the kill.
+                string originalRequestJson = await File.ReadAllTextAsync(
+                    Path.Combine(evidence, "pcb-route-restart-original-request.json"), token);
+                JsonElement originalRequest = JsonSerializer.Deserialize<JsonElement>(originalRequestJson);
+                Assert.AreEqual(operationId, originalRequest.GetProperty("operationId").GetString());
+                Assert.AreEqual(oldEpoch, originalRequest.GetProperty("processEpoch").GetString());
+                Assert.AreEqual(candidateJson, originalRequest.GetProperty("createRequestJson").GetString(),
+                    "The replacement must see the same deterministic candidate geometry.");
+                Assert.AreEqual(deleteJson, originalRequest.GetProperty("deleteRequestJson").GetString(),
+                    "The replacement must see the same deterministic rip-up geometry.");
+
+                JsonElement receipt = await reconnectMcp.Tool("kicad_pcb_route_reroute_receipt", new
+                {
+                    instanceId,
+                    expectedProcessEpoch = replacementClient.Epoch,
+                    operationId,
+                    expectedRequestJson = originalRequestJson
+                });
+                await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-route-restart-receipt.json"),
+                    receipt.GetRawText(), token);
+                Assert.IsTrue(receipt.GetProperty("isError").GetBoolean(), receipt.GetRawText());
+                JsonElement receiptData = receipt.GetProperty("structuredContent");
+                Assert.AreEqual("operation_outcome_unknown", receiptData.GetProperty("errorCode").GetString(), receipt.GetRawText());
+                Assert.AreEqual("unknown", receiptData.GetProperty("outcome").GetString(), receipt.GetRawText());
+                Assert.AreEqual(oldEpoch, receiptData.GetProperty("durableProcessEpoch").GetString(), receipt.GetRawText());
+                Assert.IsFalse(receiptData.GetProperty("nativeReceiptAvailable").GetBoolean(), receipt.GetRawText());
+                Assert.IsFalse(receiptData.GetProperty("retryDispatched").GetBoolean(), receipt.GetRawText());
+                Assert.AreEqual("unknown-native-outcome", receiptData.GetProperty("retrySafety").GetString(), receipt.GetRawText());
+
+                // A lookup without the original request cannot be treated as
+                // a native receipt read after an epoch change.  This verifies
+                // the stale native boundary is rejected before any retry.
+                JsonElement staleLookup = await reconnectMcp.Tool("kicad_pcb_route_reroute_receipt", new
+                {
+                    instanceId, expectedProcessEpoch = replacementClient.Epoch, operationId
+                });
+                await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-route-restart-stale-lookup-refused.json"),
+                    staleLookup.GetRawText(), token);
+                Assert.IsTrue(staleLookup.GetProperty("isError").GetBoolean(), staleLookup.GetRawText());
+                Assert.AreEqual("stale_process_epoch",
+                    staleLookup.GetProperty("structuredContent").GetProperty("code").GetString(), staleLookup.GetRawText());
+            }
+
+            var reopenedRoutes = await replacementClient.InvokeAsync<GetItems, GetItemsResponse>(new()
+            {
+                Header = new() { Document = replacementBoard },
+                Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia }
+            }, token);
+            string[] afterRouteIds = reopenedRoutes.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray();
+            string[] afterRouteShapes = reopenedRoutes.Items.Select(RouteShape).Order(StringComparer.Ordinal).ToArray();
+            CollectionAssert.AreEqual(beforeRouteIds, afterRouteIds,
+                "A killed route apply must not create or delete persisted route identities.");
+            CollectionAssert.AreEqual(beforeRouteShapes, afterRouteShapes,
+                "A killed route apply must not leave duplicate or altered persisted geometry.");
+            CollectionAssert.AreEqual(savedBoard, await File.ReadAllBytesAsync(boardPath, token),
+                "A killed route apply must not persist a partial board mutation.");
+            await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-route-restart-persistence.json"),
+                JsonSerializer.Serialize(new
+                {
+                    instanceId, oldEpoch, replacementEpoch = replacementClient.Epoch, operationId,
+                    beforeRouteIds, afterRouteIds, beforeRouteShapes, afterRouteShapes,
+                    boardBytesSha256 = Convert.ToHexStringLower(SHA256.HashData(savedBoard)),
+                    duplicateGeometryCount = afterRouteShapes.Length - afterRouteShapes.Distinct(StringComparer.Ordinal).Count()
+                }), token);
+        }
+        finally
+        {
+            if (native is not null && !native.HasExited)
+            {
+                SignalProcess(native.Id, SigContinue);
+                native.Kill(entireProcessTree: true);
+            }
+            if (replacement is not null && !replacement.HasExited)
+                replacement.Kill(entireProcessTree: true);
+            if (native is not null) await native.WaitForExitAsync(CancellationToken.None);
+            if (replacement is not null) await replacement.WaitForExitAsync(CancellationToken.None);
+            try { await Task.WhenAll(captures).WaitAsync(TimeSpan.FromSeconds(10)); }
+            catch (OperationCanceledException) { }
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
     }
 

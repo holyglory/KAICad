@@ -4916,7 +4916,7 @@ public sealed partial class NativeSessionTests
                     staleLookup.GetRawText(), token);
                 Assert.IsTrue(staleLookup.GetProperty("isError").GetBoolean(), staleLookup.GetRawText());
                 Assert.AreEqual("stale_process_epoch",
-                    staleLookup.GetProperty("structuredContent").GetProperty("code").GetString(), staleLookup.GetRawText());
+                    staleLookup.GetProperty("structuredContent").GetProperty("errorCode").GetString(), staleLookup.GetRawText());
             }
 
             var reopenedRoutes = await replacementClient.InvokeAsync<GetItems, GetItemsResponse>(new()

@@ -4871,50 +4871,15 @@ public sealed partial class NativeSessionTests
             {
                 RequireToolSuccess(await reconnectMcp.Tool("kicad_instance_attach",
                     new { endpoint = replacementClient.Endpoint, expectedInstanceId = instanceId }));
-                // Reconstruct the exact retained request from the native
-                // board state and the DRC-bound candidate.  The receipt tool
-                // canonicalizes it before comparing the durable fingerprint.
-                var replacementState = await replacementClient.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                    new() { Document = replacementBoard }, token);
-                JsonElement replacementPlan = await reconnectMcp.Tool("kicad_pcb_route_plan", new
-                {
-                    instanceId,
-                    documentJson = SchematicJson.Formatter.Format(replacementBoard),
-                    expectedStateJson = SchematicJson.Formatter.Format(replacementState),
-                    requestJson = JsonSerializer.Serialize(new
-                    {
-                        netName = "POWER_RAIL",
-                        start = new { xNm = 30_100_000L, yNm = 30_100_000L },
-                        end = new { xNm = 30_500_000L, yNm = 30_500_000L },
-                        layer = "F.Cu", widthNm = 250_000L, clearanceNm = 100_000L,
-                        gridNm = 100_000L,
-                        bounds = new { minXNm = 29_000_000L, minYNm = 29_000_000L,
-                            maxXNm = 31_000_000L, maxYNm = 31_000_000L },
-                        includeFootprintEnvelopes = true, includeRipUpCandidate = true,
-                        maxNodes = 10_000
-                    })
-                });
-                // The plan itself is read-only and serves only to recover the
-                // exact candidate/delete payloads for receipt identity; it
-                // must never be used to redispatch the lost operation.
-                RequireToolSuccess(replacementPlan);
-                JsonElement replacementPlanData = replacementPlan.GetProperty("structuredContent");
-                Assert.IsTrue(replacementPlanData.GetProperty("routeFound").GetBoolean(), replacementPlan.GetRawText());
-                string candidateJson = replacementPlanData.GetProperty("candidateRequestJson").GetString()!;
-                string deleteJson = replacementPlanData.GetProperty("ripUpCandidateRequestJson").GetString()!;
-                // The original DRC payload is part of the operation identity.
-                // Reusing a deterministic fixture and a fresh plan is not
-                // sufficient to recover it, so use the durable request saved
-                // immediately before the kill.
+                // The original DRC payload and route geometry are part of the
+                // operation identity.  Read the exact request saved before the
+                // kill; replanning against the replacement native process may
+                // allocate fresh proposal IDs and would be the wrong request.
                 string originalRequestJson = await File.ReadAllTextAsync(
                     Path.Combine(evidence, "pcb-route-restart-original-request.json"), token);
                 JsonElement originalRequest = JsonSerializer.Deserialize<JsonElement>(originalRequestJson);
                 Assert.AreEqual(operationId, originalRequest.GetProperty("operationId").GetString());
                 Assert.AreEqual(oldEpoch, originalRequest.GetProperty("processEpoch").GetString());
-                Assert.AreEqual(candidateJson, originalRequest.GetProperty("createRequestJson").GetString(),
-                    "The replacement must see the same deterministic candidate geometry.");
-                Assert.AreEqual(deleteJson, originalRequest.GetProperty("deleteRequestJson").GetString(),
-                    "The replacement must see the same deterministic rip-up geometry.");
 
                 JsonElement receipt = await reconnectMcp.Tool("kicad_pcb_route_reroute_receipt", new
                 {

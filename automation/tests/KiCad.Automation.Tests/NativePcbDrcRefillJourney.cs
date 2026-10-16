@@ -58,7 +58,7 @@ public sealed partial class NativeSessionTests
             await using var agent = await PcbDrcAgent.StartAsync(client,
                 Path.Combine(evidence, "pcb-drc-refill-mcp.stderr.log"), token);
             string operationId = Guid.NewGuid().ToString("D");
-            var reply = await agent.Mcp.Tool("kicad_pcb_drc_start", new
+            var startRequest = new
             {
                 instanceId = agent.InstanceId,
                 documentJson = SchematicJson.Formatter.Format(boardDocument),
@@ -68,7 +68,10 @@ public sealed partial class NativeSessionTests
                 testFootprints = false,
                 expectedRevisionJson = SchematicJson.Formatter.Format(before.Revision),
                 processEpoch = client.Epoch
-            });
+            };
+            await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-drc-job-refill-request.json"),
+                JsonSerializer.Serialize(startRequest, new JsonSerializerOptions { WriteIndented = true }), token);
+            var reply = await agent.Mcp.Tool("kicad_pcb_drc_start", startRequest);
             Assert.IsFalse(PcbDrcAgent.Failed(reply), reply.GetRawText());
             var state = SchematicJson.Parser.Parse<PcbDrcJobState>(PcbDrcAgent.Text(reply));
             Assert.AreEqual(operationId, state.OperationId);
@@ -129,6 +132,7 @@ public sealed partial class NativeSessionTests
                 operationId,
                 jobId = state.JobId,
                 processEpoch = client.Epoch,
+                refillZones = true,
                 status = state.Status.ToString(),
                 snapshotComplete = state.SnapshotComplete,
                 resultsFresh = state.ResultsFresh,

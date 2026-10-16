@@ -575,7 +575,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_footprint_library_checked_receipt", ReadOnly = true),
-     Description("Read one exact process-owned checked footprint-library receipt after a lost reply or MCP reconnect. The original request, document, process epoch and operation identity must match; lookup never dispatches a writer."),
+     Description("Read one exact checked direct-footprint-file receipt after a lost reply, MCP reconnect or native process restart. Supply the current process epoch and the original request JSON; after an epoch change the durable old-epoch record is returned without a native lookup or writer retry, and admitted or unknown outcomes remain fail-closed."),
      KiCadCapability("footprint-library", "checked-native-direct-footprint-file", "exact checked request, process-owned receipt, revision and rollback evidence"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> CheckedReceipt(string instanceId, string expectedProcessEpoch,
@@ -588,12 +588,74 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             try { expectedRequest = SchematicJson.Parser.Parse<NativeCapabilityFootprintLibraryCheckedWrite>(expectedRequestJson); }
             catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
             { throw new AutomationException("invalid_library_request", "expectedRequestJson is not valid checked footprint request: " + error.Message); }
-            if (!expectedRequest.Document.Equals(document) || expectedRequest.ProcessEpoch != expectedProcessEpoch
+            if (expectedRequest.Document is null || !expectedRequest.Document.Equals(document)
+                || !FootprintLibraryCheckedReceiptRecord.CanonicalGuid(expectedRequest.ProcessEpoch)
                 || expectedRequest.OperationId != operationId)
-                throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
+                throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, original process epoch and operation UUID.");
             var receiptStore = new FootprintLibraryCheckedReceiptStore(registry.StateDirectory);
-            FootprintLibraryCheckedReceiptRecord? durableBeforeNative = receiptStore.ReadBound(instanceId, expectedRequest);
+            bool sameProcessEpoch = expectedRequest.ProcessEpoch == expectedProcessEpoch;
+            FootprintLibraryCheckedReceiptRecord? durableBeforeNative = sameProcessEpoch
+                ? receiptStore.ReadBound(instanceId, expectedRequest)
+                : receiptStore.ReadBoundAfterNativeRestart(instanceId, expectedRequest, expectedProcessEpoch);
+
+            // A changed epoch cannot answer the original checked request: the
+            // native receipt table belongs to the old process. Confirm that the
+            // replacement process is the one named by the caller, then return
+            // only the exact durable MCP record. This branch never invokes a
+            // native lookup or a writer, so an admitted/unknown result cannot
+            // be replayed accidentally after a restart.
+            if (!sameProcessEpoch)
+            {
+                NativeClient replacement = registry.Client(instanceId);
+                AutomationSession replacementSession = await replacement.HandshakeAsync(cancellationToken);
+                if (replacementSession.InstanceId != instanceId || replacementSession.Epoch != expectedProcessEpoch)
+                    throw new AutomationException("stale_process_epoch", "The current native process epoch does not match the recovery request.");
+                if (durableBeforeNative is null)
+                    throw new AutomationException("stale_process_epoch", "The original checked footprint request has no durable receipt; inspect the library before retrying.");
+
+                if (durableBeforeNative.Outcome == FootprintLibraryCheckedReceiptRecord.Terminal)
+                {
+                    NativeCapabilityFootprintLibraryCheckedWriteResponse retained =
+                        FootprintLibraryCheckedReceiptStore.ParseResponse(durableBeforeNative.ResponseJson);
+                    FootprintLibraryCheckedContract.ValidateResponse(retained, expectedRequest);
+                    retained.Replayed = true;
+                    return Data(new
+                    {
+                        instanceId,
+                        processEpoch = expectedProcessEpoch,
+                        durableProcessEpoch = durableBeforeNative.ProcessEpoch,
+                        operationId,
+                        found = true,
+                        receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(retained)),
+                        nativeReceiptAvailable = false,
+                        durableRecovery = true,
+                        retryDispatched = false,
+                        retrySafety = "terminal-receipt"
+                    });
+                }
+
+                return Data(new
+                {
+                    instanceId,
+                    processEpoch = expectedProcessEpoch,
+                    durableProcessEpoch = durableBeforeNative.ProcessEpoch,
+                    operationId,
+                    found = true,
+                    receipt = (JsonElement?)null,
+                    nativeReceiptAvailable = false,
+                    durableRecovery = true,
+                    retryDispatched = false,
+                    outcome = durableBeforeNative.Outcome,
+                    retrySafety = "unknown-native-outcome",
+                    errorCode = "operation_outcome_unknown",
+                    errorMessage = durableBeforeNative.ErrorMessage.Length == 0
+                        ? "The checked footprint write has no terminal receipt; inspect the native library before retrying."
+                        : durableBeforeNative.ErrorMessage
+                }, isError: true);
+            }
+
             NativeCapabilityFootprintLibraryCheckedReadOperationResponse? nativeResponse = null;
+            AutomationException? nativeUnavailable = null;
             try
             {
                 NativeClient client = registry.Client(instanceId);
@@ -624,6 +686,14 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 }
             }
             catch (NngException) { }
+            catch (AutomationException error) when (error.Code is "stale_process_epoch" or "instance_exited"
+                or "instance_changed" or "unknown_instance")
+            {
+                // A native replacement discards its process-owned receipt table.
+                // The exact request-bound MCP record remains authoritative for
+                // recovery; preserve this failure only when no durable record exists.
+                nativeUnavailable = error;
+            }
 
             FootprintLibraryCheckedReceiptRecord? durable = receiptStore.Read(instanceId, operationId);
             if (durable is not null)
@@ -649,6 +719,9 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                         ? "The checked footprint write has no terminal receipt; inspect the native library before retrying."
                         : durable.ErrorMessage);
             }
+
+            if (nativeUnavailable is not null)
+                throw nativeUnavailable;
 
             return Data(new
             {

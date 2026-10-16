@@ -1,3 +1,8 @@
+using System.Text.Json;
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common;
+using Kiapi.Common.Commands;
 using Kiapi.Board.Types;
 using Kiapi.Common.Types;
 using KiCad.Automation.Model;
@@ -50,6 +55,109 @@ public sealed class FootprintLibraryCheckedReceiptStoreTests
             conflict.ExpectedSnapshotSha256 = new string('f', 64);
             Assert.ThrowsExactly<AutomationException>(() =>
                 new FootprintLibraryCheckedReceiptStore(root).Reserve(instance, conflict));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public void DurableUnknownReceiptIsRecoverableAcrossNativeRestartWithoutRedispatch()
+    {
+        string root = Directory.CreateTempSubdirectory("footprint-checked-restart-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = Request(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"));
+            var first = new FootprintLibraryCheckedReceiptStore(root);
+            _ = first.Reserve(instance, request);
+            first.WriteUnknown(instance, request, "operation_outcome_unknown", "native process ended after dispatch");
+
+            string replacementEpoch = Guid.NewGuid().ToString("D");
+            var reopened = new FootprintLibraryCheckedReceiptStore(root);
+            FootprintLibraryCheckedReceiptRecord? recovered = reopened.ReadBoundAfterNativeRestart(
+                instance, request, replacementEpoch);
+
+            Assert.IsNotNull(recovered);
+            Assert.AreEqual(FootprintLibraryCheckedReceiptRecord.Unknown, recovered!.Outcome);
+            Assert.AreEqual(request.ProcessEpoch, recovered.ProcessEpoch);
+
+            var replacementRequest = request.Clone();
+            replacementRequest.ProcessEpoch = replacementEpoch;
+            AutomationException conflict = Assert.ThrowsExactly<AutomationException>(() =>
+                reopened.Reserve(instance, replacementRequest));
+            Assert.AreEqual("operation_id_conflict", conflict.Code);
+            Assert.AreEqual(FootprintLibraryCheckedReceiptRecord.Unknown,
+                reopened.Read(instance, request.OperationId)!.Outcome);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CheckedReceiptReturnsTerminalDurableEvidenceAfterNativeRestartWithoutLookup()
+    {
+        string root = Directory.CreateTempSubdirectory("footprint-checked-tool-terminal-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = Request(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"));
+            var store = new FootprintLibraryCheckedReceiptStore(root);
+            _ = store.Reserve(instance, request);
+            store.WriteTerminal(instance, request, TerminalResponse(request));
+
+            string replacementEpoch = Guid.NewGuid().ToString("D");
+            var transport = new FootprintReceiptTransport(instance, replacementEpoch);
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), instance);
+
+            var result = await new FootprintLibraryTools(registry).CheckedReceipt(
+                instance, replacementEpoch, SchematicJson.Formatter.Format(request.Document),
+                request.OperationId, SchematicJson.Formatter.Format(request), default);
+
+            Assert.IsFalse(result.IsError ?? false, JsonSerializer.Serialize(result.StructuredContent));
+            var data = JsonSerializer.SerializeToElement(result.StructuredContent);
+            Assert.AreEqual(replacementEpoch, data.GetProperty("processEpoch").GetString());
+            Assert.AreEqual(request.ProcessEpoch, data.GetProperty("durableProcessEpoch").GetString());
+            Assert.IsTrue(data.GetProperty("durableRecovery").GetBoolean());
+            Assert.IsFalse(data.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsFalse(data.GetProperty("retryDispatched").GetBoolean());
+            Assert.AreEqual("terminal-receipt", data.GetProperty("retrySafety").GetString());
+            Assert.AreEqual("unavailable", data.GetProperty("receipt").GetProperty("status").GetString());
+            Assert.AreEqual(0, transport.NativeCalls,
+                "A receipt-only recovery must not issue a native checked-read request.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CheckedReceiptReturnsFailClosedUnknownAfterNativeRestartWithoutRetry()
+    {
+        string root = Directory.CreateTempSubdirectory("footprint-checked-tool-unknown-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = Request(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"));
+            var store = new FootprintLibraryCheckedReceiptStore(root);
+            _ = store.Reserve(instance, request);
+            store.WriteUnknown(instance, request, "operation_outcome_unknown", "native process ended after dispatch");
+
+            string replacementEpoch = Guid.NewGuid().ToString("D");
+            var transport = new FootprintReceiptTransport(instance, replacementEpoch);
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), instance);
+
+            var result = await new FootprintLibraryTools(registry).CheckedReceipt(
+                instance, replacementEpoch, SchematicJson.Formatter.Format(request.Document),
+                request.OperationId, SchematicJson.Formatter.Format(request), default);
+
+            Assert.IsTrue(result.IsError ?? false, JsonSerializer.Serialize(result.StructuredContent));
+            var data = JsonSerializer.SerializeToElement(result.StructuredContent);
+            Assert.AreEqual("operation_outcome_unknown", data.GetProperty("errorCode").GetString());
+            Assert.AreEqual(replacementEpoch, data.GetProperty("processEpoch").GetString());
+            Assert.AreEqual(request.ProcessEpoch, data.GetProperty("durableProcessEpoch").GetString());
+            Assert.AreEqual("unknown", data.GetProperty("outcome").GetString());
+            Assert.AreEqual("unknown-native-outcome", data.GetProperty("retrySafety").GetString());
+            Assert.IsFalse(data.GetProperty("retryDispatched").GetBoolean());
+            Assert.AreEqual(0, transport.NativeCalls,
+                "An unknown durable outcome must remain receipt-only after restart.");
         }
         finally { Directory.Delete(root, true); }
     }
@@ -199,5 +307,58 @@ public sealed class FootprintLibraryCheckedReceiptStoreTests
             },
             Overwrite = true
         };
+    }
+
+    private static NativeCapabilityFootprintLibraryCheckedWriteResponse TerminalResponse(
+        NativeCapabilityFootprintLibraryCheckedWrite request)
+    {
+        var response = new NativeCapabilityFootprintLibraryCheckedWriteResponse
+        {
+            Document = request.Document.Clone(), ProcessEpoch = request.ProcessEpoch,
+            OperationId = request.OperationId, Status = "unavailable",
+            ErrorCode = "library_mutation_unavailable", ErrorMessage = "provider unavailable",
+            ReceiptStatus = NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsUnavailable,
+            Scope = "mcp_direct_footprint_file", ExpectedRequestVerified = true,
+            Request = request.Clone(),
+            RequestFingerprintSha256 = FootprintLibraryCheckedContract.ComputeFingerprint(request)
+        };
+        return response;
+    }
+
+    private sealed class FootprintReceiptTransport(string instanceId, string epoch) : INativeTransport
+    {
+        internal int NativeCalls { get; private set; }
+
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] request,
+            TimeSpan timeout, CancellationToken cancellationToken = default)
+        {
+            var api = ApiRequest.Parser.ParseFrom(request);
+            IMessage payload;
+            if (api.Message.Is(GetAutomationSession.Descriptor))
+            {
+                payload = new AutomationSession
+                {
+                    ProtocolVersion = 1,
+                    InstanceId = instanceId,
+                    Epoch = epoch,
+                    ProjectPath = "/tmp/footprint-receipt-fixture.kicad_pro"
+                };
+            }
+            else
+            {
+                NativeCalls++;
+                payload = new GetVersionResponse
+                {
+                    Version = new KiCadVersion { FullVersion = "footprint-receipt-fixture" }
+                };
+            }
+
+            return Task.FromResult(new ApiResponse
+            {
+                Header = new ApiResponseHeader { KicadToken = epoch },
+                Status = new ApiResponseStatus { Status = (ApiStatusCode)1 },
+                Message = Any.Pack(payload)
+            }.ToByteArray());
+        }
     }
 }

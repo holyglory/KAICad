@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -105,6 +106,7 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             var bytes = await File.ReadAllBytesAsync(outputPath, cancellationToken);
             if (bytes.Length == 0 || bytes.Length > 32 * 1024 * 1024)
                 throw new AutomationException("pcb_render_invalid_output", "The native renderer returned an empty or oversized PNG.");
+            PcbRenderImageInfo imageInfo = PcbRenderImageContract.Validate(bytes, request.Width, request.Height);
             var after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
                 new() { Document = document }, cancellationToken);
             if (!after.Equals(expected))
@@ -115,7 +117,8 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                 : JsonDocument.Parse(JsonFormatter.Default.Format(inspection.Metadata)).RootElement.Clone();
             PcbRenderMetadataValidation metadataValidation = inspection is null
                 ? PcbRenderMetadataValidation.Unavailable
-                : PcbRenderMetadataContract.Validate(inspection.Metadata, request, expected.StateSha256, requestSha256);
+                : PcbRenderMetadataContract.Validate(inspection.Metadata, request, expected.StateSha256, requestSha256,
+                    imageInfo.Width, imageInfo.Height);
             PcbRenderCoverage coverage = inspection is null
                 ? PcbRenderCoverage.Unavailable
                 : PcbRenderCoverageContract.Evaluate(inspection.Metadata, metadataValidation.IsValid,
@@ -141,8 +144,17 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                 afterState = SchematicJson.Formatter.Format(after),
                 view = new { side = request.Side.ToString(), width = request.Width, height = request.Height,
                     perspective = request.Perspective, zoom = request.Zoom },
-                image = new { mimeType = "image/png", width = request.Width, height = request.Height,
-                    bytes = bytes.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) },
+                image = new
+                {
+                    mimeType = "image/png",
+                    requestedWidth = request.Width,
+                    requestedHeight = request.Height,
+                    width = imageInfo.Width,
+                    height = imageInfo.Height,
+                    dimensionsVerified = true,
+                    bytes = bytes.Length,
+                    sha256 = imageInfo.Sha256
+                },
                 requestSha256,
                 metadataAvailable = inspection is not null,
                 metadataValidated = metadataValidation.IsValid,
@@ -223,6 +235,38 @@ internal static class PcbRenderInspectionContract
         if (inspection.Job is null || inspection.Metadata is null)
             throw new AutomationException("pcb_render_metadata_unavailable",
                 "The native render inspection did not return its job and metadata envelopes.");
+    }
+}
+
+internal readonly record struct PcbRenderImageInfo(uint Width, uint Height, string Sha256);
+
+internal static class PcbRenderImageContract
+{
+    private static ReadOnlySpan<byte> PngSignature => [137, 80, 78, 71, 13, 10, 26, 10];
+
+    internal static PcbRenderImageInfo Validate(ReadOnlySpan<byte> png, int requestedWidth,
+        int requestedHeight)
+    {
+        if (requestedWidth <= 0 || requestedHeight <= 0)
+            throw new AutomationException("pcb_render_invalid_output", "The render request dimensions must be positive.");
+
+        // PNG's first chunk is always a 13-byte IHDR. Checking that header
+        // against the returned bytes prevents the MCP envelope from claiming
+        // the requested dimensions when a native exporter wrote a different
+        // image or a non-PNG payload.
+        if (png.Length < 24 || !png[..8].SequenceEqual(PngSignature)
+            || BinaryPrimitives.ReadUInt32BigEndian(png[8..12]) != 13
+            || !png[12..16].SequenceEqual("IHDR"u8))
+            throw new AutomationException("pcb_render_invalid_output",
+                "The native renderer did not return a PNG with an IHDR header.");
+
+        uint width = BinaryPrimitives.ReadUInt32BigEndian(png[16..20]);
+        uint height = BinaryPrimitives.ReadUInt32BigEndian(png[20..24]);
+        if (width == 0 || height == 0 || width > (uint) requestedWidth || height > (uint) requestedHeight)
+            throw new AutomationException("pcb_render_invalid_output",
+                $"The PNG dimensions {width}x{height} exceed the requested render {requestedWidth}x{requestedHeight}.");
+
+        return new(width, height, Convert.ToHexStringLower(SHA256.HashData(png)));
     }
 }
 
@@ -384,7 +428,8 @@ internal static class PcbRenderMetadataContract
         "column-major; clip=projection*view*board_to_scene*[x_nm,y_nm,z_nm,1]; pixel origin top-left";
 
     internal static PcbRenderMetadataValidation Validate(PcbRenderMetadata metadata,
-        RunBoardJobExportRender request, string expectedStateSha256, string requestSha256)
+        RunBoardJobExportRender request, string expectedStateSha256, string requestSha256,
+        uint? imageWidth = null, uint? imageHeight = null)
     {
         var failures = new List<string>();
 
@@ -395,6 +440,9 @@ internal static class PcbRenderMetadataContract
         if (metadata.WidthPixels == 0 || metadata.HeightPixels == 0
             || metadata.WidthPixels > request.Width || metadata.HeightPixels > request.Height)
             failures.Add("camera metadata dimensions must be positive and no larger than the requested image");
+        if (imageWidth is uint capturedWidth && imageHeight is uint capturedHeight
+            && (metadata.WidthPixels != capturedWidth || metadata.HeightPixels != capturedHeight))
+            failures.Add("camera metadata dimensions must match the returned PNG dimensions");
 
         if (metadata.ViewMatrixColumnMajor.Count != 16
             || metadata.ProjectionMatrixColumnMajor.Count != 16

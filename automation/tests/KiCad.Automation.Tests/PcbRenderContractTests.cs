@@ -1,7 +1,10 @@
 using Kiapi.Board.Jobs;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace KiCad.Automation.Tests;
@@ -9,6 +12,52 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class PcbRenderContractTests
 {
+    [TestMethod]
+    public void ReturnedPngHeaderBindsActualDimensionsAndHashToTheRenderEnvelope()
+    {
+        byte[] png = PngHeader(312, 224);
+
+        PcbRenderImageInfo image = PcbRenderImageContract.Validate(png, 320, 240);
+
+        Assert.AreEqual(312u, image.Width);
+        Assert.AreEqual(224u, image.Height);
+        Assert.AreEqual(Convert.ToHexStringLower(SHA256.HashData(png)), image.Sha256);
+    }
+
+    [TestMethod]
+    public void ReturnedPngMustHaveSignatureAndIhdrWithinRequestedDimensions()
+    {
+        byte[] signatureMismatch = PngHeader(320, 240);
+        signatureMismatch[0] = 0;
+        AutomationException signatureError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbRenderImageContract.Validate(signatureMismatch, 320, 240));
+        Assert.AreEqual("pcb_render_invalid_output", signatureError.Code);
+
+        byte[] ihdrMismatch = PngHeader(320, 240);
+        "TEXT"u8.CopyTo(ihdrMismatch.AsSpan(12, 4));
+        AutomationException ihdrError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbRenderImageContract.Validate(ihdrMismatch, 320, 240));
+        Assert.AreEqual("pcb_render_invalid_output", ihdrError.Code);
+
+        AutomationException dimensionError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbRenderImageContract.Validate(PngHeader(321, 240), 320, 240));
+        StringAssert.Contains(dimensionError.Message, "exceed the requested render");
+    }
+
+    [TestMethod]
+    public void CameraMetadataCannotBePairedWithDifferentReturnedPngDimensions()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        PcbRenderMetadataValidation validation = PcbRenderMetadataContract.Validate(
+            CameraMetadata(stateHash, inputHash), RenderRequest(), stateHash, inputHash, 312, 224);
+
+        Assert.IsFalse(validation.IsValid);
+        StringAssert.Contains(string.Join("; ", validation.Failures),
+            "camera metadata dimensions must match the returned PNG dimensions");
+    }
+
     [TestMethod]
     public void GeometryObservationStatusIsExplicitlyIncompleteAndNeverClaimsRasterCoverage()
     {
@@ -471,4 +520,15 @@ public sealed class PcbRenderContractTests
     }
 
     private static double[] IdentityMatrix() => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+    private static byte[] PngHeader(uint width, uint height)
+    {
+        byte[] png = new byte[32];
+        new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }.CopyTo(png, 0);
+        BinaryPrimitives.WriteUInt32BigEndian(png.AsSpan(8, 4), 13);
+        "IHDR"u8.CopyTo(png.AsSpan(12, 4));
+        BinaryPrimitives.WriteUInt32BigEndian(png.AsSpan(16, 4), width);
+        BinaryPrimitives.WriteUInt32BigEndian(png.AsSpan(20, 4), height);
+        return png;
+    }
 }

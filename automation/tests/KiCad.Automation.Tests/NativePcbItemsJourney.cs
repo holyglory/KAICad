@@ -4722,7 +4722,7 @@ public sealed partial class NativeSessionTests
         try
         {
             await File.WriteAllTextAsync(project, "{\"meta\":{\"version\":3}}\n", token);
-            await File.WriteAllTextAsync(boardPath, CleanRouteBoard(), token);
+            await File.WriteAllTextAsync(boardPath, RouteRestartBoard(), token);
             byte[] savedBoard = await File.ReadAllBytesAsync(boardPath, token);
 
             native = StartNative("pcb-route-restart-old-native.log");
@@ -4986,6 +4986,35 @@ public sealed partial class NativeSessionTests
             try { Directory.Delete(scratch, recursive: true); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
+    }
+
+    // The full CleanRouteBoard fixture intentionally contains disconnected
+    // probe nets for the normal PCB-items journey.  A process-loss receipt
+    // test needs a DRC-clean replacement candidate, so keep a dedicated
+    // two-pad, one-net board here rather than weakening the DRC assertion.
+    private static string RouteRestartBoard()
+    {
+        string f1 = Guid.NewGuid().ToString("D"), f2 = Guid.NewGuid().ToString("D");
+        string p1 = Guid.NewGuid().ToString("D"), p2 = Guid.NewGuid().ToString("D");
+        string track = Guid.NewGuid().ToString("D"), edge = Guid.NewGuid().ToString("D");
+        return $"""
+(kicad_pcb (version 20260206) (generator "pcbnew")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "POWER_RAIL")
+  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{edge}"))
+  (footprint "PAD1" (layer "F.Cu") (at 30.1 30.1) (uuid "{f1}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "POWER_RAIL") (uuid "{p1}")))
+  (footprint "PAD2" (layer "F.Cu") (at 30.5 30.5) (uuid "{f2}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "POWER_RAIL") (uuid "{p2}")))
+  (segment (start 30.1 30.1) (end 30.5 30.5) (width 0.25) (layer "F.Cu") (net 1) (uuid "{track}"))
+)
+""";
     }
 
     private static string CleanRouteBoard()

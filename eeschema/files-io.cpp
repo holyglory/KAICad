@@ -988,7 +988,7 @@ void SCH_EDIT_FRAME::OnImportProject()
 }
 
 
-bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath )
+bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSavePath, bool isSaveAs )
 {
     wxString msg;
     wxFileName schematicFileName;
@@ -1073,7 +1073,8 @@ bool SCH_EDIT_FRAME::saveSchematicFile( SCH_SHEET* aSheet, const wxString& aSave
 
     if( success )
     {
-        screen->SetContentModified( false );
+        if( !isSaveAs )
+            screen->SetContentModified( false );
 
         msg.Printf( _( "File '%s' saved." ),  screen->GetFileName() );
         SetStatusText( msg, 0 );
@@ -1403,7 +1404,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         if( !saveCopy && tmpFn.GetFullPath() != screen->GetFileName() )
             screen->AssignNewUuid();
 
-        bool savedThisSheet = saveSchematicFile( screens.GetSheet( i ), tmpFn.GetFullPath() );
+        bool savedThisSheet = saveSchematicFile( screens.GetSheet( i ), tmpFn.GetFullPath(), saveCopy );
 
         if( savedThisSheet )
             savedSheetPaths.push_back( tmpFn.GetFullPath() );
@@ -1465,7 +1466,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
     // Record a full project snapshot so related files (symbols, libs, sheets) are captured.
     // Skip when running standalone without a project loaded - the save path can land
     // anywhere on the filesystem and there is no project context for a snapshot.
-    if( success && !Prj().IsNullProject() )
+    if( success && !saveCopy && !Prj().IsNullProject() )
     {
         Kiway().LocalHistory().RunRegisteredSaversAndCommit( Prj().GetProjectPath(), wxS( "SCH Save" ), wxS( "sch" ) );
 

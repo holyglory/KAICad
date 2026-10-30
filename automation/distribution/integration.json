@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "status": "conflicts",
+  "upstreamTag": "10.0.8",
+  "upstreamCommit": "e432beac2668303194ba2040274f9e5efe773fc0",
+  "featureCommit": "bb759b483b47f3ed41e3d22b391f6a14f73a7272",
+  "featureBase": "f638a860a05b3e48d1074314a656ad9b8f597466",
+  "conflicts": []
+}

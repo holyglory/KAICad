@@ -49,8 +49,10 @@ set( QA_COMMON_SRCS
     test_dialog_shim.cpp
     test_eda_shape.cpp
     test_eda_text.cpp
+    test_edit_constraints.cpp
     test_wx_dataviewctrl.cpp
     test_embedded_file_compress.cpp
+    test_env_paths.cpp
     test_expand_text_vars.cpp
     test_file_history.cpp
     test_filename_resolver.cpp
@@ -69,6 +71,7 @@ set( QA_COMMON_SRCS
     test_outline_font.cpp
     test_dxf_plotter.cpp
     test_gerber_plotter.cpp
+    test_pdf_circle_plot.cpp
     test_pdf_unicode_plot.cpp
     test_kiid.cpp
     test_layer_ids.cpp
@@ -145,6 +148,7 @@ set( QA_COMMON_SRCS
     test_project_file.cpp
     test_settings_manager.cpp
     test_nested_settings.cpp
+    test_net_settings.cpp
     test_component_class_settings.cpp
     test_project_local_settings.cpp
     test_remote_provider_metadata.cpp

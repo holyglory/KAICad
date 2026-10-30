@@ -86,14 +86,21 @@ KICOMMON_API wxString JoinExtensions( const std::vector<std::string>& aExts );
  * Replace any environment variable & text variable references with their values.
  *
  * @param aString a string containing (perhaps) references to env var
+ * @param aAllowEscapes false in a URI, where a backslash can only be a separator.
  * @return the expanded environment variable.
  */
-KICOMMON_API const wxString ExpandEnvVarSubstitutions( const wxString& aString, const PROJECT* aProject );
+KICOMMON_API const wxString ExpandEnvVarSubstitutions( const wxString& aString, const PROJECT* aProject,
+                                                       bool aAllowEscapes = true );
 
 /**
  * Expand '${var-name}' templates in text.
  */
 #define FOR_ERC_DRC 1
+
+/**
+ * Resolving a URI, where a backslash is a path separator and never an escape.
+ */
+#define FOR_URI 2
 
 KICOMMON_API wxString ExpandTextVars( const wxString& aSource, const std::function<bool( wxString* )>* aResolver,
                                       int aFlags = 0, int aDepth = 0 );
@@ -139,6 +146,27 @@ KICOMMON_API wxString DescribeRef( const wxString& aRef );
  * Replace any environment and/or text variables in URIs
  */
 KICOMMON_API const wxString ResolveUriByEnvVars( const wxString& aUri, const PROJECT* aProject );
+
+/**
+ * Expand text variables, environment variables and a leading '~' in a user-entered file path.
+ *
+ * The result may still be relative. Only "~" and "~/" are recognized, "~user" is left alone.
+ *
+ * @param aPath is the path as typed by the user or stored in a settings file.
+ * @param aProject is used to resolve project variables, may be null.
+ * @param aTextResolver resolves text variables in place of the project, may be null.
+ */
+KICOMMON_API wxString ExpandPathVariables( const wxString& aPath, const PROJECT* aProject,
+                                           const std::function<bool( wxString* )>* aTextResolver = nullptr );
+
+/**
+ * Expand a user-entered file path as ExpandPathVariables() does, then anchor a relative result at
+ * the project directory so it does not depend on the working directory.
+ *
+ * A path that still begins with an unresolved variable is returned as is.
+ */
+KICOMMON_API wxString ResolveProjectPath( const wxString& aPath, const PROJECT* aProject,
+                                          const std::function<bool( wxString* )>* aTextResolver = nullptr );
 
 
 /**

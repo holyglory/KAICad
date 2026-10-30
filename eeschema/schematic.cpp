@@ -1568,7 +1568,7 @@ void SCHEMATIC::CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen )
 
     for( SCH_ITEM* item : aScreen->Items().OfType( SCH_JUNCTION_T ) )
     {
-        if( !aScreen->IsExplicitJunction( item->GetPosition() ) )
+        if( !aScreen->IsExplicitJunctionAllowed( item->GetPosition() ) )
         {
             if( item->IsSelected() || item->HasFlag( SELECTED_BY_DRAG ) )
                 continue;
@@ -2142,8 +2142,7 @@ SCH_SHEET_LIST SCHEMATIC::BuildSheetListSortedByPageNumbers() const
 {
     SCH_SHEET_LIST hierarchy;
 
-    wxLogTrace( traceSchSheetPaths, "BuildSheetListSortedByPageNumbers: %zu top-level sheets",
-                m_topLevelSheets.size() );
+    KI_TRACE( traceSchSheetPaths, "BuildSheetListSortedByPageNumbers: %zu top-level sheets", m_topLevelSheets.size() );
 
     // Can't build hierarchy without top-level sheets
     if( m_topLevelSheets.empty() )
@@ -2154,8 +2153,8 @@ SCH_SHEET_LIST SCHEMATIC::BuildSheetListSortedByPageNumbers() const
     {
         if( sheet )
         {
-            wxLogTrace( traceSchSheetPaths, "  Top-level sheet: '%s' (UUID=%s, isVirtualRoot=%d)", sheet->GetName(),
-                        sheet->m_Uuid.AsString(), sheet->m_Uuid == niluuid ? 1 : 0 );
+            KI_TRACE( traceSchSheetPaths, "  Top-level sheet: '%s' (UUID=%s, isVirtualRoot=%d)", sheet->GetName(),
+                      sheet->m_Uuid.AsString(), sheet->m_Uuid == niluuid ? 1 : 0 );
 
             // Build the sheet list for this top-level sheet
             SCH_SHEET_LIST sheetList;

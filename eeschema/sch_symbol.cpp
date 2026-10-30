@@ -573,28 +573,24 @@ void SCH_SYMBOL::RemoveInstance( const SCH_SHEET_PATH& aInstancePath )
 
 void SCH_SYMBOL::RemoveInstance( const KIID_PATH& aInstancePath )
 {
-    bool removed = false;
-
     // Search for an existing path and remove it if found
-    // (search from back to avoid invalidating iterator on remove)
-    for( int ii = m_instances.size() - 1; ii >= 0; --ii )
+    auto indexIt = m_instancePathIndex.find( aInstancePath );
+
+    if( indexIt != m_instancePathIndex.end() )
     {
-        if( m_instances[ii].m_Path == aInstancePath )
-        {
-            wxLogTrace( traceSchSheetPaths,
-                        wxS( "Removing symbol instance:\n"
-                             "    sheet path %s\n"
-                             "    reference %s, unit %d from symbol %s." ),
-                        aInstancePath.AsString(), m_instances[ii].m_Reference, m_instances[ii].m_Unit,
-                        m_Uuid.AsString() );
+        size_t ii = indexIt->second;
+        wxASSERT( ii < m_instances.size() );
+        wxASSERT( m_instances[ii].m_Path == aInstancePath );
 
-            m_instances.erase( m_instances.begin() + ii );
-            removed = true;
-        }
-    }
+        KI_TRACE( traceSchSheetPaths,
+                  wxS( "Removing symbol instance:\n"
+                       "    sheet path %s\n"
+                       "    reference %s, unit %d from symbol %s." ),
+                  aInstancePath.AsString(), m_instances[ii].m_Reference, m_instances[ii].m_Unit, m_Uuid.AsString() );
 
-    if( removed )
+        m_instances.erase( m_instances.begin() + ii );
         rebuildInstancePathIndex();
+    }
 }
 
 
@@ -604,7 +600,10 @@ void SCH_SYMBOL::rebuildInstancePathIndex()
     m_instancePathIndex.reserve( m_instances.size() );
 
     for( size_t i = 0; i < m_instances.size(); ++i )
+    {
+        wxASSERT( m_instancePathIndex.find( m_instances[i].m_Path ) == m_instancePathIndex.end() );
         m_instancePathIndex[m_instances[i].m_Path] = i;
+    }
 }
 
 
@@ -625,12 +624,12 @@ void SCH_SYMBOL::AddHierarchicalReference( const SCH_SYMBOL_INSTANCE& aInstance 
 
     SCH_SYMBOL_INSTANCE instance = aInstance;
 
-    wxLogTrace( traceSchSheetPaths,
-                wxS( "Adding symbol '%s' instance:\n"
-                     "    sheet path '%s'\n"
-                     "    reference '%s'\n"
-                     "    unit %d\n" ),
-                m_Uuid.AsString(), instance.m_Path.AsString(), instance.m_Reference, instance.m_Unit );
+    KI_TRACE( traceSchSheetPaths,
+              wxS( "Adding symbol '%s' instance:\n"
+                   "    sheet path '%s'\n"
+                   "    reference '%s'\n"
+                   "    unit %d\n" ),
+              m_Uuid.AsString(), instance.m_Path.AsString(), instance.m_Reference, instance.m_Unit );
 
     m_instancePathIndex[instance.m_Path] = m_instances.size();
     m_instances.push_back( instance );
@@ -651,10 +650,10 @@ const wxString SCH_SYMBOL::GetRef( const SCH_SHEET_PATH* sheet, bool aIncludeUni
     wxString  ref;
     wxString  subRef;
 
-    wxLogTrace( traceSchSymbolRef, "GetRef for symbol %s on path %s (sheet path has %zu sheets)",
+    KI_TRACE( traceSchSymbolRef, "GetRef for symbol %s on path %s (sheet path has %zu sheets)",
                 m_Uuid.AsString(), path.AsString(), sheet->size() );
 
-    wxLogTrace( traceSchSymbolRef, "  Symbol has %zu instance references", m_instances.size() );
+    KI_TRACE( traceSchSymbolRef, "  Symbol has %zu instance references", m_instances.size() );
 
     if( auto it = m_instancePathIndex.find( path ); it != m_instancePathIndex.end() )
     {
@@ -662,7 +661,7 @@ const wxString SCH_SYMBOL::GetRef( const SCH_SHEET_PATH* sheet, bool aIncludeUni
 
         ref = instance.m_Reference;
         subRef = SubReference( instance.m_Unit );
-        wxLogTrace( traceSchSymbolRef, "  MATCH FOUND: ref=%s", ref );
+        KI_TRACE( traceSchSymbolRef, "  MATCH FOUND: ref=%s", ref );
     }
 
     // If it was not found in m_Paths array, then see if it is in m_Field[REFERENCE] -- if so,
@@ -672,19 +671,19 @@ const wxString SCH_SYMBOL::GetRef( const SCH_SHEET_PATH* sheet, bool aIncludeUni
     if( ref.IsEmpty() && !GetField( FIELD_T::REFERENCE )->GetText().IsEmpty() )
     {
         ref = GetField( FIELD_T::REFERENCE )->GetText();
-        wxLogTrace( traceSchSymbolRef, "  Using fallback from REFERENCE field: %s", ref );
+        KI_TRACE( traceSchSymbolRef, "  Using fallback from REFERENCE field: %s", ref );
     }
 
     if( ref.IsEmpty() )
     {
         ref = UTIL::GetRefDesUnannotated( m_prefix );
-        wxLogTrace( traceSchSymbolRef, "  Using unannotated reference: %s", ref );
+        KI_TRACE( traceSchSymbolRef, "  Using unannotated reference: %s", ref );
     }
 
     if( aIncludeUnit && GetUnitCount() > 1 )
         ref += subRef;
 
-    wxLogTrace( traceSchSymbolRef, "  Final reference: %s", ref );
+    KI_TRACE( traceSchSymbolRef, "  Final reference: %s", ref );
 
     return ref;
 }

@@ -84,6 +84,13 @@ DIALOG_PLOT_SCHEMATIC::DIALOG_PLOT_SCHEMATIC( SCH_EDIT_FRAME* aEditFrame, wxWind
         m_sdbSizer1Apply->Hide();
         m_openFileAfterPlot->Hide();
 
+        if( !m_job->GetOutputPathIsDirectory() )
+        {
+            m_outputPathLabel->SetLabel( _( "Output file:" ) );
+            m_outputPath->SetToolTip( _( "Target file for the plot. Can be absolute or relative to the schematic "
+                                         "main file location." ) );
+        }
+
         SetupStandardButtons();
     }
 
@@ -187,7 +194,7 @@ bool DIALOG_PLOT_SCHEMATIC::TransferDataToWindow()
 void DIALOG_PLOT_SCHEMATIC::onOutputDirectoryBrowseClicked( wxCommandEvent& event )
 {
     // Build the absolute path of current output directory to preselect it in the file browser.
-    wxString path = ExpandEnvVarSubstitutions( m_outputPath->GetValue(), &Prj() );
+    wxString path;
 
     // When editing a schematic that is not part of a project in the stand alone mode, the
     // project path is not defined so point to the users document path to save the plot files.
@@ -198,8 +205,7 @@ void DIALOG_PLOT_SCHEMATIC::onOutputDirectoryBrowseClicked( wxCommandEvent& even
     else
     {
         // Build the absolute path of current output directory to preselect it in the file browser.
-        path = ExpandEnvVarSubstitutions( m_outputPath->GetValue(), &Prj() );
-        path = Prj().AbsolutePath( path );
+        path = ResolveProjectPath( m_outputPath->GetValue(), &Prj() );
     }
 
     wxDirDialog dirDialog( this, _( "Select Output Directory" ), path );
@@ -393,9 +399,7 @@ wxString DIALOG_PLOT_SCHEMATIC::getOutputPath()
                 return schematic.ResolveTextVar( &schematic.CurrentSheet(), token, 0 );
             };
 
-    wxString path = m_outputPath->GetValue();
-    path = ExpandTextVars( path, &textResolver );
-    path = ExpandEnvVarSubstitutions( path, &Prj() );
+    wxString path = ExpandPathVariables( m_outputPath->GetValue(), &Prj(), &textResolver );
 
     fn.SetPath( path );
 

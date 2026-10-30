@@ -138,6 +138,14 @@ DIALOG_PLOT::DIALOG_PLOT( PCB_EDIT_FRAME* aEditFrame, wxWindow* aParent, JOB_EXP
         m_DRCExclusionsWarning->Hide();
         m_sdbSizer1Apply->Hide();
         m_zoneFillCheck->SetLabel( _( "Refill zones before plotting" ) );
+
+        // UpdateUI rather than wxEVT_CHECKBOX so dialog undo/redo also refreshes the label
+        m_staticTextDir->Bind( wxEVT_UPDATE_UI,
+                               [this]( wxUpdateUIEvent& aEvent )
+                               {
+                                   updateJobOutputLabel();
+                                   aEvent.Skip();
+                               } );
     }
     else
     {
@@ -420,6 +428,10 @@ bool DIALOG_PLOT::TransferDataToWindow()
     // DXF units selection
     m_DXF_plotUnits->SetSelection( m_plotOpts.GetDXFPlotUnits() == DXF_UNITS::INCH ? 0 : 1 );
 
+    // Job only, PCB_PLOTTER honours this flag for non-DXF formats too
+    if( m_job )
+        m_DXF_exportAsMultiLayeredFile->SetValue( m_plotOpts.GetDXFMultiLayeredExportOption() );
+
     // Plot mirror option
     m_plotMirrorOpt->SetValue( m_plotOpts.GetMirror() );
 
@@ -441,7 +453,38 @@ bool DIALOG_PLOT::TransferDataToWindow()
     wxCommandEvent cmd_event;
     SetPlotFormat( cmd_event );
 
+    if( m_job )
+        updateJobOutputLabel();
+
     return true;
+}
+
+
+void DIALOG_PLOT::updateJobOutputLabel()
+{
+    PLOT_FORMAT fmt = getPlotFormat();
+    bool        singleFile = ( fmt == PLOT_FORMAT::PDF && m_pdfSingle->GetValue() )
+                             || ( fmt == PLOT_FORMAT::DXF && m_DXF_exportAsMultiLayeredFile->GetValue() );
+
+    wxString label = singleFile ? _( "Output file:" ) : _( "Output directory:" );
+
+    if( m_staticTextDir->GetLabel() == label )
+        return;
+
+    m_staticTextDir->SetLabel( label );
+
+    if( singleFile )
+    {
+        m_outputDirectoryName->SetToolTip( _( "Target file for the plot. Can be absolute or relative to the board "
+                                              "file location." ) );
+    }
+    else
+    {
+        m_outputDirectoryName->SetToolTip( _( "Target directory for plot files. Can be absolute or relative to "
+                                              "the board file location." ) );
+    }
+
+    Layout();
 }
 
 
@@ -806,10 +849,7 @@ void DIALOG_PLOT::onOutputDirectoryBrowseClicked( wxCommandEvent& event )
                 return m_editFrame->GetBoard()->ResolveTextVar( token, 0 );
             };
 
-    wxString path = m_outputDirectoryName->GetValue();
-    path = ExpandTextVars( path, &textResolver );
-    path = ExpandEnvVarSubstitutions( path, &Prj() );
-    path = Prj().AbsolutePath( path );
+    wxString path = ResolveProjectPath( m_outputDirectoryName->GetValue(), &Prj(), &textResolver );
 
     wxDirDialog dirDialog( this, _( "Select Output Directory" ), path );
 
@@ -1232,9 +1272,7 @@ void DIALOG_PLOT::Plot( wxCommandEvent& event )
                     return m_editFrame->GetBoard()->ResolveTextVar( token, 0 );
                 };
 
-        wxString path = m_plotOpts.GetOutputDirectory();
-        path = ExpandTextVars( path, &textResolver );
-        path = ExpandEnvVarSubstitutions( path, board->GetProject() );
+        wxString path = ExpandPathVariables( m_plotOpts.GetOutputDirectory(), board->GetProject(), &textResolver );
 
         wxFileName outputDir = wxFileName::DirName( path );
         wxString   boardFilename = m_editFrame->GetBoard()->GetFileName();
@@ -1349,10 +1387,7 @@ void DIALOG_PLOT::onOpenOutputDirectory( wxCommandEvent& event )
         return m_editFrame->GetBoard()->ResolveTextVar( token, 0 );
     };
 
-    wxString path = m_outputDirectoryName->GetValue();
-    path = ExpandTextVars( path, &textResolver );
-    path = ExpandEnvVarSubstitutions( path, &Prj() );
-    path = Prj().AbsolutePath( path );
+    wxString path = ResolveProjectPath( m_outputDirectoryName->GetValue(), &Prj(), &textResolver );
 
     if( !wxDirExists( path ) )
     {
